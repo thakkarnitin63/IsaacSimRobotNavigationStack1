@@ -1,0 +1,38 @@
+# navigation_stack/configs/stvl_config.yaml
+
+stvl:
+  # Grid parameters (Nav2: voxel_size, update_footprint_enabled, etc.)
+  voxel_size: 0.1
+  size_x: 20.0
+  size_y: 20.0
+  size_z: 3.0
+  
+  # Robot parameters
+  robot:
+    ground_clearance: 0.05       # Nav2: min_obstacle_height
+    height: 1.5                  # Used for collision checking
+  
+  # Temporal decay (Nav2: decay_model, voxel_decay)
+  decay:
+    model: 'exponential'         # 'exponential', 'linear', or 'persistent'
+    time: 5.0                    # Voxel decay time (seconds)
+    distance: 10.0               # Clear beyond this distance
+    acceleration: 1.5            # Frustum acceleration factor
+  
+  # Sensor parameters
+  sensor:
+    obstacle_range: 10.0         # Nav2: obstacle_range
+    min_obstacle_height: 0.05    # Nav2: min_obstacle_height
+    max_obstacle_height: 2.5     # Nav2: max_obstacle_height
+    
+    # Frustum parameters (Nav2: vertical_fov_angle, etc.)
+    vertical_fov_angle: 0.7      # ~40 degrees
+    vertical_fov_padding: 0.0
+    horizontal_fov_angle: 6.28   # ~360 degrees (full lidar)
+  
+  # Projection parameters (Nav2: mark_threshold)
+  mark_threshold: 0              # Min voxels per column (0 = any voxel)
+  
+  # Feature flags
+  enable_frustum_clearing: true  # Enable frustum-based clearing
+  enable_outlier_removal: true   # Enable statistical outlier removal

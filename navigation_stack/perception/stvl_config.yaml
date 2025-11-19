@@ -1,0 +1,40 @@
+# stvl_config.yaml
+# Place this in: /home/nitin/navigationStackv1/navigation_stack/perception/
+# (Same folder as stvl_stem.py)
+
+# =============================================================================
+# GRID CONFIGURATION
+# =============================================================================
+grid:
+  dimensions: [128, 128, 64]        # [Width, Height, Depth] voxels
+  voxel_size: 0.1                   # meters per voxel (10cm)
+  robot_centric_offset: [-6.4, -6.4, 0.0]  # meters
+
+# =============================================================================
+# LIDAR SENSOR - Hesai XT-32
+# =============================================================================
+lidar:
+  # Frustum (Field of View)
+  v_fov_deg: 31.0           # Vertical FOV: +15° to -16° = 31° total
+  v_fov_padding_m: 0.05     # 5cm padding
+  h_fov_deg: 360.0          # Full rotation
+  min_range_m: 0.1          # Ignore points closer than 10cm
+  max_range_m: 15.0         # Max detection range
+  
+  # Height filter
+  min_height_m: 0.1         # Ignore ground plane
+  max_height_m: 2.0         # Ignore ceiling
+
+# =============================================================================
+# STVL ALGORITHM
+# =============================================================================
+stvl:
+  decay_rate: 0.35              # How fast obstacles fade (0.0-1.0)
+  min_occupancy: 0.0            # Free space value
+  max_occupancy: 1.0            # Occupied value
+  costmap_threshold: 0.3        # Binary threshold for 2D costmap
+
+# =============================================================================
+# COMPUTE
+# =============================================================================
+device: "cuda:0"
