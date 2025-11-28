@@ -7,9 +7,9 @@ import math
 import yaml
 
 # Import our custom files
-import numba_kernel
+from . import numba_kernel
 import kaolin.math.quat as Kq
-from frustum_model import ThreeDimensionalLidarFrustum 
+from .frustum_model import ThreeDimensionalLidarFrustum 
 
 class STVL_System:
     """
@@ -167,7 +167,8 @@ class STVL_System:
         
         # 1d. Get the frustum mask
         frustum_mask = self.frustum.is_inside(points_world)
-        
+        # frustum_mask = torch.ones(points_world.shape[0], dtype=torch.bool, device=self.device)
+
         # 1e. Get height filter mask
         z_world = points_world[:, 2]
         robot_z = robot_pose[2]

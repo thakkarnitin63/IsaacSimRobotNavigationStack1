@@ -112,77 +112,40 @@ class ThreeDimensionalLidarFrustum:
         self._orientation_inverse = Kq.quat_inverse(orientation_quat)
 
     def is_inside(self, points: torch.Tensor) -> torch.Tensor:
-        """
-        Check if points are inside the frustum.
-        """
-        # Handle empty input
+        """Check if points are inside the frustum."""
         if points.shape[0] == 0:
             return torch.zeros(0, device=self.device, dtype=torch.bool)
-
+        
         if self._position is None or self._orientation_inverse is None:
             return torch.zeros(points.shape[0], device=self.device, dtype=torch.bool)
         
-        # === STEP 1: Transform to Sensor Frame ===
-        points_translated = points - self._position  # [N, 3]
+        # Transform to sensor frame
+        points_translated = points - self._position
         
-        # quat_rotate expects: rotation [b, 4], point [b, 3]
+        # Filter out invalid points at sensor origin
+        valid_mask = torch.norm(points_translated, dim=1) > 1e-3
+        if valid_mask.sum() == 0:
+            return torch.zeros(points.shape[0], device=self.device, dtype=torch.bool)
+        
         N = points_translated.shape[0]
-        quat_expanded = self._orientation_inverse.unsqueeze(0).expand(N, -1)  # [N, 4]
+        quat_expanded = self._orientation_inverse.unsqueeze(0).expand(N, -1)
+        transformed_pts = Kq.quat_rotate(quat_expanded, points_translated)
         
-        transformed_pts = Kq.quat_rotate(quat_expanded, points_translated)  # [N, 3]
+        # Radial distance
+        radial_distance_squared = transformed_pts[:, 0]**2 + transformed_pts[:, 1]**2
         
-        print(f"  Frustum Debug - First point:")
-        print(f"    Original: {points[0].cpu().numpy()}")
-        print(f"    Translated: {points_translated[0].cpu().numpy()}")
-        print(f"    Transformed: {transformed_pts[0].cpu().numpy()}")
+        # Range check
+        range_ok = (radial_distance_squared >= self._min_d_squared) & \
+                (radial_distance_squared <= self._max_d_squared)
         
-        # === STEP 2: Radial Distance Check ===
-        radial_distance_squared = (
-            transformed_pts[:, 0] * transformed_pts[:, 0] +
-            transformed_pts[:, 1] * transformed_pts[:, 1]
-        )
-        
-        print(f"    Radial dist²: {radial_distance_squared[0].item():.4f} (should be in [{self._min_d_squared:.4f}, {self._max_d_squared:.4f}])")
-        
-        # === STEP 3: Range Check ===
-        range_ok = (radial_distance_squared <= self._max_d_squared) & \
-                (radial_distance_squared >= self._min_d_squared)
-        
-        print(f"    Range check: {range_ok[0].item()}")
-        
-        # === STEP 4: Vertical FOV Check ===
+        # Vertical FOV check
         v_padded = torch.abs(transformed_pts[:, 2]) + self._vFOVPadding
-        v_fov_ok = (v_padded * v_padded / (radial_distance_squared + 1e-8)) <= \
-                self._tan_vFOVhalf_squared
+        v_fov_ok = (v_padded**2 / (radial_distance_squared + 1e-8)) <= self._tan_vFOVhalf_squared
         
-        ratio = (v_padded[0] * v_padded[0] / (radial_distance_squared[0] + 1e-8)).item()
-        print(f"    V-FOV check: {v_fov_ok[0].item()}, ratio={ratio:.4f} vs threshold={self._tan_vFOVhalf_squared:.4f}")
+        # Horizontal FOV (360° for Hesai XT-32)
+        h_fov_ok = torch.ones(N, device=self.device, dtype=torch.bool)
         
-        # === STEP 5: Horizontal FOV Check ===
-        if not self._full_hFOV:
-            x = transformed_pts[:, 0]
-            y = transformed_pts[:, 1]
-            
-            half_pi = math.pi / 2.0
-            
-            angles_1 = torch.abs(torch.atan(y / (x + 1e-8)))
-            mask_1 = (x > 0) & (angles_1 <= self._hFOVhalf)
-            
-            angles_2 = torch.abs(torch.atan(x / (y + 1e-8))) + half_pi
-            mask_2 = (x <= 0) & (angles_2 <= self._hFOVhalf)
-            
-            h_fov_ok = mask_1 | mask_2
-        else:
-            h_fov_ok = torch.ones(points.shape[0], device=self.device, dtype=torch.bool)
-        
-        print(f"    H-FOV check: {h_fov_ok[0].item()} (full 360°)")
-        
-        # === STEP 6: Combine All Checks ===
-        inside = range_ok & v_fov_ok & h_fov_ok
-        
-        print(f"    FINAL: {inside[0].item()}")
-        print(f"  Total passing: {inside.sum().item()}/{N}")
-        
-        return inside
+        # Combine all checks
+        return valid_mask & range_ok & v_fov_ok & h_fov_ok
     
 

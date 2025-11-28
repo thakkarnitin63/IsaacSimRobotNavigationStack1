@@ -6,9 +6,9 @@
 # GRID CONFIGURATION
 # =============================================================================
 grid:
-  dimensions: [128, 128, 64]        # [Width, Height, Depth] voxels
+  dimensions: [256, 256, 64]        # [Width, Height, Depth] voxels
   voxel_size: 0.1                   # meters per voxel (10cm)
-  robot_centric_offset: [-6.4, -6.4, 0.0]  # meters
+  robot_centric_offset: [-12.8, -12.8, 0.0] # meters
 
 # =============================================================================
 # LIDAR SENSOR - Hesai XT-32
@@ -16,14 +16,14 @@ grid:
 lidar:
   # Frustum (Field of View)
   v_fov_deg: 31.0           # Vertical FOV: +15° to -16° = 31° total
-  v_fov_padding_m: 0.05     # 5cm padding
+  v_fov_padding_m: 0.1     # 5cm padding
   h_fov_deg: 360.0          # Full rotation
-  min_range_m: 0.1          # Ignore points closer than 10cm
-  max_range_m: 15.0         # Max detection range
+  min_range_m: 0.5          # Ignore points closer than 10cm
+  max_range_m: 30.0         # Max detection range
   
   # Height filter
-  min_height_m: 0.1         # Ignore ground plane
-  max_height_m: 2.0         # Ignore ceiling
+  min_height_m: 0.3         # Ignore ground plane
+  max_height_m: 3.0         # Ignore ceiling
 
 # =============================================================================
 # STVL ALGORITHM

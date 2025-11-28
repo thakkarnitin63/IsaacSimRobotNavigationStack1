@@ -30,11 +30,14 @@ from pxr import Usd, Gf, UsdGeom
 
 # --- 4. IMPORTS ---
 from navigation_stack.robot.nova_carter import NovaCarter
+from navigation_stack.robot.h1_humanoid import H1Humanoid
+
+# from navigation_stack.controllers.mppi_controller import MPPIController
 from navigation_stack.controllers.mppi_controller import MPPIController
-from navigation_stack.controllers.simple_controller import SimpleController
+from navigation_stack.controllers.mppi_types import MPPIConfig
+# from navigation_stack.controllers.simple_controller import SimpleController
 from navigation_stack.planner.global_planner import GlobalPlanner
 from navigation_stack.perception.stvl_stem import STVL_System
-from navigation_stack.utils.height_map_processor import HeightMapProcessor
 from isaacsim.core.utils.rotations import quat_to_euler_angles
 from omni.isaac.core.utils.extensions import enable_extension
 from isaacsim.core.api import World
@@ -80,21 +83,24 @@ class NavigationSimulator:
         # We will get this after the robot is spawned
         self.lidar_to_base_pos = None
         self.lidar_to_base_quat = None
-
+        
+        # --- Human actor ---
+        self.h1_humanoid = None
+        self.h1_timeline_sub = None
 
         # --- Initialize all our modules ---
         print("Initializing navigation modules...")
         self.global_planner = GlobalPlanner()
         # Define our grid properties
-        self.height_map_processor = HeightMapProcessor(
-            grid_resolution=0.05,  # 5cm per cell
-            grid_width_m=30.0,     # 40m wide map
-            grid_height_m=30.0,    # 40m tall map
-            robot_height=2.5,      # Max obstacle height to care about (2m)
-            robot_ground_clearance=0.1 # Ignore floor (5cm)
-        )
+        # self.height_map_processor = HeightMapProcessor(
+        #     grid_resolution=0.05,  # 5cm per cell
+        #     grid_width_m=30.0,     # 40m wide map
+        #     grid_height_m=30.0,    # 40m tall map
+        #     robot_height=2.5,      # Max obstacle height to care about (2m)
+        #     robot_ground_clearance=0.1 # Ignore floor (5cm)
+        # )
         # self.mppi_controller = MPPIController()
-        self.mppi_controller = SimpleController()
+        # self.mppi_controller = SimpleController()
 
         self.stvl = STVL_System()
         
@@ -147,6 +153,157 @@ class NavigationSimulator:
         draw.draw_points(point_list, colors, sizes)
         print(f"   ✓ Drew {len(point_list)} points (sampled from {len(points_world)})")
 
+    def setup_h1_humanoid(self):
+        """Spawn H1 humanoid robot that walks straight."""
+        try:
+            print("Spawning H1 humanoid robot...")
+            
+            # Spawn position: left side of warehouse, facing +Y direction
+            spawn_pos = [-7.0, 7.0, 1.05]  # Near left wall
+            walk_distance = 5.0  # Walk 3.5 meters (from y=1.0 to y=4.5)
+            
+            self.h1_humanoid = H1Humanoid(
+                world=self.world,
+                spawn_position=spawn_pos,
+                walk_distance=walk_distance
+            )
+            
+            if self.h1_humanoid.spawn():
+                # Add physics callback
+                self.world.add_physics_callback(
+                    "h1_physics_step",
+                    callback_fn=self.h1_humanoid.on_physics_step
+                )
+                
+                # Add timeline event callback
+                timeline = omni.timeline.get_timeline_interface()
+                self.h1_timeline_sub = timeline.get_timeline_event_stream().create_subscription_to_pop_by_type(
+                    int(omni.timeline.TimelineEventType.PLAY),
+                    self.h1_humanoid.on_timeline_event
+                )
+                
+                print("✓ H1 humanoid ready to walk")
+            else:
+                self.h1_humanoid = None
+        except Exception as e:
+            print(f" Failed to spawn H1: {e}")
+            self.h1_humanoid = None
+
+
+    def visualize_3d_voxel_grid(self, robot_pose_vector):
+        """Visualize grid as vertical bars: XY = position, Z = occupancy height."""
+        draw = _debug_draw.acquire_debug_draw_interface()
+        
+        # Get 3D grid and project to 2D (max over Z)
+        stvl_grid_3d = self.stvl.stvl_grid.cpu().numpy()  # [W, H, D]
+        costmap_2d = np.max(stvl_grid_3d, axis=2)  # [W, H] - max occupancy per column
+        
+        grid_dims = self.stvl.grid_dims
+        voxel_size = self.stvl.voxel_size
+        robot_centric_offset = self.stvl.robot_centric_offset.cpu().numpy()
+        grid_origin = robot_pose_vector + robot_centric_offset
+        
+        # Find occupied cells
+        occupied_indices = np.argwhere(costmap_2d > 0.1)
+        
+        if len(occupied_indices) == 0:
+            return
+        
+        # print(f"   🧊 Drawing {len(occupied_indices)} grid bars")
+        
+        max_height = 1.0  # Maximum bar height in meters
+        
+        for idx in occupied_indices:
+            i, j = idx
+            occupancy = costmap_2d[i, j]
+            
+            # XY position (center of grid cell)
+            x = grid_origin[0] + (i + 0.5) * voxel_size
+            y = grid_origin[1] + (j + 0.5) * voxel_size
+            z_base = robot_pose_vector[2]  # Ground level
+            
+            # Height = occupancy (0.1 to 1.0 → 0.2m to 2.0m)
+            height = occupancy * max_height
+            z_top = z_base + height
+            
+            # Color: yellow if occupancy=1.0, blue gradient if <1.0
+            if occupancy >= 0.99:
+                color = (1.0, 1.0, 0.0, 0.8)  # Yellow
+            else:
+                # Blue gradient: darker = lower occupancy
+                brightness = occupancy
+                color = (0.0, 0.0, brightness, 0.6)  # Blue
+            
+            # Draw vertical bar (4 vertical edges + top/bottom squares)
+            half = voxel_size * 0.4
+            corners_bottom = [
+                (x - half, y - half, z_base),
+                (x + half, y - half, z_base),
+                (x + half, y + half, z_base),
+                (x - half, y + half, z_base),
+            ]
+            
+            corners_top = [
+                (x - half, y - half, z_top),
+                (x + half, y - half, z_top),
+                (x + half, y + half, z_top),
+                (x - half, y + half, z_top),
+            ]
+            
+            # Bottom square
+            for i in range(4):
+                draw.draw_lines([corners_bottom[i]], [corners_bottom[(i+1)%4]], [color], [2.0])
+            
+            # Top square
+            for i in range(4):
+                draw.draw_lines([corners_top[i]], [corners_top[(i+1)%4]], [color], [2.0])
+            
+            # 4 vertical edges
+            for i in range(4):
+                draw.draw_lines([corners_bottom[i]], [corners_top[i]], [color], [2.0])
+    def visualize_costmap(self, costmap_2d, robot_pose_vector):
+        """Visualize the 2D costmap in Isaac Sim using debug draw."""
+        draw = _debug_draw.acquire_debug_draw_interface()
+        
+        grid_dims = self.stvl.grid_dims
+        voxel_size = self.stvl.voxel_size
+        robot_centric_offset = self.stvl.robot_centric_offset.cpu().numpy()
+        grid_origin = robot_pose_vector + robot_centric_offset
+        
+        # Lower threshold to see more cells
+        occupied_indices = np.argwhere(costmap_2d > 0.1)
+        
+        # Debug print
+        print(f"   🗺️ Costmap: {len(occupied_indices)} cells, max={costmap_2d.max():.3f}, grid_origin={grid_origin}")
+        
+        if occupied_indices.shape[0] == 0:
+            return
+        
+        world_points = []
+        for idx in occupied_indices:
+            i, j = idx
+            world_x = grid_origin[0] + (i + 0.5) * voxel_size
+            world_y = grid_origin[1] + (j + 0.5) * voxel_size
+            world_z = robot_pose_vector[2] + 0.5  # Higher for visibility
+            world_points.append((world_x, world_y, world_z))
+        
+        if len(world_points) > 0:
+            # Brighter magenta color, bigger size
+            colors = [(1.0, 0.0, 1.0, 1.0)] * len(world_points)
+            sizes = [voxel_size * 150] * len(world_points)
+            draw.draw_points(world_points, colors, sizes)
+            
+            # Thicker green grid outline
+            corners = [
+                (grid_origin[0], grid_origin[1], robot_pose_vector[2] + 0.05),
+                (grid_origin[0] + grid_dims[0] * voxel_size, grid_origin[1], robot_pose_vector[2] + 0.05),
+                (grid_origin[0] + grid_dims[0] * voxel_size, grid_origin[1] + grid_dims[1] * voxel_size, robot_pose_vector[2] + 0.05),
+                (grid_origin[0], grid_origin[1] + grid_dims[1] * voxel_size, robot_pose_vector[2] + 0.05),
+            ]
+            
+            start_points = [corners[0], corners[1], corners[2], corners[3]]
+            end_points = [corners[1], corners[2], corners[3], corners[0]]
+            draw.draw_lines(start_points, end_points, [(0.0, 1.0, 0.0, 1.0)] * 4, [5.0] * 4)
     def clear_debug_drawing(self):
         """Clear all debug draw visualizations"""
         draw = _debug_draw.acquire_debug_draw_interface()
@@ -174,7 +331,8 @@ class NavigationSimulator:
         omni.usd.get_context().open_stage(scene_path)
         self.simulation_app.update()
         
-        self.world = World(stage_units_in_meters=1.0)
+        self.world = World(stage_units_in_meters=1.0, physics_dt=1.0/200.0)
+        # self.world.reset()
         
         # 3. Get the stage and context from the new, valid world
         self.stage = self.world.stage
@@ -238,29 +396,37 @@ class NavigationSimulator:
         UsdGeom.Xform.Define(self.stage, "/World/Debug")
         self.simulation_app.update()
         
-        # # 1. Giant GREEN Cube at the START
-        # start_pos_3d = np.array([self.START_POS[0], self.START_POS[1], 1.0])
-        # self.create_debug_cube("/World/Debug/Waypoint_Start", 
-        #                        start_pos_3d, 
-        #                        size=2.0, 
-        #                        color=(0.0, 1.0, 0.0)) # Green
 
-        # # 2. Giant RED Cube at the FINAL GOAL
-        # goal_pos_3d = np.array([self.GOAL_POS[0], self.GOAL_POS[1], 1.0])
-        # self.create_debug_cube("/World/Debug/Waypoint_Goal", 
-        #                        goal_pos_3d, 
-        #                        size=2.0, 
-        #                        color=(1.0, 0.0, 0.0)) # Red
-        
-        # # 3. Spawn a small blue cube at EACH waypoint
-        # print(f"Spawning {len(self.waypoint_list)} blue waypoint cubes...")
-        # for i, waypoint in enumerate(self.waypoint_list):
-        #     waypoint_pos_3d = np.array([waypoint[0], waypoint[1], 0.2]) # 20cm high
-        #     prim_path = f"/World/Debug/Waypoint_Cube_{i}"
-        #     self.create_debug_cube(prim_path, 
-        #                            waypoint_pos_3d, 
-        #                            size=0.1, # 10cm cube
-        #                            color=(0.0, 0.5, 1.0)) # Blue
+        print("INITIALIZING MPPI CONTROLLER")
+        # Convert path to numpy array
+        full_path_array = np.array(self.waypoint_list)
+        goal_array = np.array(self.GOAL_POS)
+
+        # Create MPPI config
+        mppi_config = MPPIConfig(
+            num_samples=1000,          # K trajectories
+            horizon_steps=56,          # T timesteps
+            dt=0.05,                   # 20Hz control
+            v_max=0.5,                 # Max forward velocity
+            v_min=-0.1,                # Allow slight reverse
+            w_max=1.0,                 # Max rotation
+            v_std=0.2,                 # Exploration noise
+            w_std=0.4,
+            lambda_=0.3,               # Temperature
+            lookahead_points=50,       # Path chunk size
+            device='cuda:0'
+        )
+        # Initialize MPPI with full path
+        self.mppi_controller = MPPIController(
+            config=mppi_config,
+            full_path=full_path_array,
+            goal=goal_array
+        )
+        print(f"✅ MPPI Controller initialized!")
+        print(f"   Path: {len(full_path_array)} waypoints")
+        print(f"   Horizon: {mppi_config.planning_horizon_seconds:.2f}s")
+        print(f"   Samples: {mppi_config.num_samples} trajectories")
+
                                
         # --- 7. CREATE ROBOT ---
         # Note: The robot's START_POS is already in the correct map coordinates
@@ -308,6 +474,8 @@ class NavigationSimulator:
             )
         )
 
+        self.setup_h1_humanoid()
+        
 
         print("\n--- Simulation is running. Robot and Humans are spawned. ---")
 
@@ -351,23 +519,12 @@ class NavigationSimulator:
                 # Update simulation
                 self.simulation_app.update()
                 
-                # Update human animations
-                # self.task.update_behaviors(dt)
                 
                 # --- SENSE ---
                 # Get 3D pose [pos(x,y,z), quat(x,y,z,w)]
                 position_3d, orientation_quat = self.robot.get_world_pose()
 
-                if i == 100:  # Run debug on frame 100
-                    print("\n" + "🔍"*35)
-                    print("RUNNING COMPREHENSIVE LIDAR DEBUG")
-                    print("🔍"*35)
-                    self.robot.debug_lidar_transform()
-                    self.robot.debug_transformation_comparison() 
-                    self.robot.debug_find_axis_transform()
-                
-                # Get raw 3D Lidar data
-                # lidar_raw_data = self.robot.get_lidar_world_points()
+            
 
                 # --- PROCESS (The "Glue") ---
                 
@@ -381,71 +538,73 @@ class NavigationSimulator:
                 
                 if target_waypoint is None:
                     # We are done! Stop the robot.
-                    cmd_vel = [0.0, 0.0]
+                    v, w = 0.0, 0.0
                 else:
                 # 3. Process 3D Lidar into 2.5D Height Map
 
                     # Default to an empty map (or the last known map)
-                    height_map = self.height_map_processor.height_map
+                    current_pose_tensor = torch.tensor(
+                        current_pose_2d,
+                        dtype=torch.float32,
+                        device='cuda'
+                    )
 
 
-                    
-                    
                 
 
-                    points_in_world_frame = self.robot.get_lidar_world_points()
+                    # points_in_world_frame = self.robot.get_lidar_world_points()
 
-                    if points_in_world_frame.size > 0 and i % 10 == 0:
-                        self.clear_debug_drawing()
+                    # if points_in_world_frame.size > 0 and i % 10 == 0:
+                    #     self.clear_debug_drawing()
                         
-                        # Get robot and lidar positions for reference
-                        robot_pos, _ = self.robot.get_world_pose()
-                        lidar_pos, _ = self.robot._lidar_vis.get_world_pose()
+                        # # Get robot and lidar positions for reference
+                        # robot_pos, _ = self.robot.get_world_pose()
+                        # lidar_pos, _ = self.robot._lidar_vis.get_world_pose()
                         
-                        # Draw the points (green)
-                        self.visualize_lidar_points(
-                            points_in_world_frame,
-                            color=(1.0, 0.0, 0.0)  # Green points
-                        )
+                        # # Draw the points (green)
+                        # self.visualize_lidar_points(
+                        #     points_in_world_frame,
+                        #     color=(1.0, 0.0, 0.0)  # Green points
+                        # )
                         
-                        # Draw reference markers
-                        draw = _debug_draw.acquire_debug_draw_interface()
+                        # # Draw reference markers
+                        # draw = _debug_draw.acquire_debug_draw_interface()
                         
                         # 1. Big RED sphere at robot base
-                        draw.draw_points([tuple(robot_pos)], [(1.0, 0.0, 0.0, 1.0)], [0.3])
+                        # draw.draw_points([tuple(robot_pos)], [(1.0, 0.0, 0.0, 1.0)], [0.3])
                         
                         # 2. Big YELLOW sphere at lidar sensor
-                        draw.draw_points([tuple(lidar_pos)], [(1.0, 1.0, 0.0, 1.0)], [0.2])
+                        # draw.draw_points([tuple(lidar_pos)], [(1.0, 1.0, 0.0, 1.0)], [0.2])
                         
                         # 3. Draw axes at lidar position
-                        axis_length = 1.0
-                        start_points = [tuple(lidar_pos)] * 3
-                        end_points = [
-                            tuple(lidar_pos + np.array([axis_length, 0, 0])),  # X red
-                            tuple(lidar_pos + np.array([0, axis_length, 0])),  # Y green
-                            tuple(lidar_pos + np.array([0, 0, axis_length]))   # Z blue
-                        ]
-                        line_colors = [
-                            (1.0, 0.0, 0.0, 1.0),
-                            (0.0, 1.0, 0.0, 1.0),
-                            (0.0, 0.0, 1.0, 1.0)
-                        ]
-                        line_sizes = [5.0, 5.0, 5.0]
+                        # axis_length = 1.0
+                        # start_points = [tuple(lidar_pos)] * 3
+                        # end_points = [
+                        #     tuple(lidar_pos + np.array([axis_length, 0, 0])),  # X red
+                        #     tuple(lidar_pos + np.array([0, axis_length, 0])),  # Y green
+                        #     tuple(lidar_pos + np.array([0, 0, axis_length]))   # Z blue
+                        # ]
+                        # line_colors = [
+                        #     (1.0, 0.0, 0.0, 1.0),
+                        #     (0.0, 1.0, 0.0, 1.0),
+                        #     (0.0, 0.0, 1.0, 1.0)
+                        # ]
+                        # line_sizes = [5.0, 5.0, 5.0]
                         
-                        draw.draw_lines(start_points, end_points, line_colors, line_sizes)
+                        # draw.draw_lines(start_points, end_points, line_colors, line_sizes)
                         
-                        # 4. Print stats every 100 frames
-                        if i % 100 == 0:
-                        #     print(f"\n📊 Frame {i} Lidar Stats:")
-                        #     print(f"   Points visualized: {len(points_in_world_frame)}")
-                        #     print(f"   Robot at: [{robot_pos[0]:.2f}, {robot_pos[1]:.2f}, {robot_pos[2]:.2f}]")
-                        #     print(f"   Lidar at: [{lidar_pos[0]:.2f}, {lidar_pos[1]:.2f}, {lidar_pos[2]:.2f}]")
+                        # # 4. Print stats every 100 frames
+                        # if i % 100 == 0:
+                        # #     print(f"\n📊 Frame {i} Lidar Stats:")
+                        # #     print(f"   Points visualized: {len(points_in_world_frame)}")
+                        # #     print(f"   Robot at: [{robot_pos[0]:.2f}, {robot_pos[1]:.2f}, {robot_pos[2]:.2f}]")
+                        # #     print(f"   Lidar at: [{lidar_pos[0]:.2f}, {lidar_pos[1]:.2f}, {lidar_pos[2]:.2f}]")
                             
-                            # Check if test cube is in view
-                            test_cube_pos = np.array([-3.0, 0.0, 0.5])
-                            dist_to_cube = np.linalg.norm(points_in_world_frame - test_cube_pos, axis=1)
-                            points_near_cube = np.sum(dist_to_cube < 1.0)
-                            # print(f"   Points near test cube (<1m): {points_near_cube}")
+                        #     # Check if test cube is in view
+                        #     test_cube_pos = np.array([-3.0, 0.0, 0.5])
+                        #     dist_to_cube = np.linalg.norm(points_in_world_frame - test_cube_pos, axis=1)
+                        #     points_near_cube = np.sum(dist_to_cube < 1.0)
+                        #     # print(f"   Points near test cube (<1m): {points_near_cube}")
                 
 
                     # --- THINK ---
@@ -462,22 +621,35 @@ class NavigationSimulator:
                         robot_pose = torch.from_numpy(robot_pose_np).float().cuda()
 
                         costmap_2d = self.stvl.update(raw_points, sensor_pose, robot_pose)
-                        costmap_np = costmap_2d.cpu().numpy()
+                        # costmap_np = costmap_2d.cpu().numpy()
+                        costmap_tensor = costmap_2d
+                        
+                        # if i % 5 == 0:  # Update visualization every 10 frames
+                            # self.visualize_costmap(costmap_np, robot_pose_np)
+                            # self.visualize_3d_voxel_grid(robot_pose_np)
                     else:
                         # No lidar data, use empty costmap
-                        costmap_np = np.zeros((128, 128), dtype=np.float32)    
-                    path_to_follow = self.waypoint_list[self.current_waypoint_idx:]
+                        costmap_tensor = torch.zeros((128, 128), dtype=torch.float32, device='cuda')
+                        robot_pose_np = np.array([position_3d[0], position_3d[1], position_3d[2]])
 
+                    # path_to_follow = self.waypoint_list[self.current_waypoint_idx:]
+                    robot_centric_offset = self.stvl.robot_centric_offset[:2].cpu().numpy()
                     # The "Brain" (MPPI) computes the command
-                   
-                    cmd_vel = self.mppi_controller.compute_control_command(
-                    current_pose_2d, 
-                    path_to_follow,
-                    height_map
-                )
+                    grid_origin = robot_pose_np[:2] + robot_centric_offset
+                    grid_origin_tensor = torch.tensor(
+                        grid_origin,
+                        dtype=torch.float32,
+                        device='cuda'
+                    )
+                    v, w = self.mppi_controller.compute_control_command(
+                        current_pose=current_pose_tensor,
+                        costmap=costmap_tensor,
+                        grid_origin=grid_origin_tensor
+                    )
+                
                 # --- ACT ---
                 # The "Driver" (DifferentialController) applies the command
-                self.robot.apply_drive_commands(cmd_vel[0], cmd_vel[1])
+                self.robot.apply_drive_commands(v, w)
                 
                 # Print for debugging
                 if i % 100 == 0: 
@@ -496,7 +668,7 @@ class NavigationSimulator:
     
                     
                     # Control command
-                    print(f"  MPPI Command: v={cmd_vel[0]:.3f} m/s, ω={cmd_vel[1]:.3f} rad/s")
+                    print(f"  MPPI Command: v={v:.3f} m/s, ω={w:.3f} rad/s")
                     print(f"{'='*60}\n")
                     
                 i += 1
