@@ -2,7 +2,8 @@
 import torch
 from numba import cuda
 import math
-
+import warnings
+from numba.core.errors import NumbaPerformanceWarning
 @cuda.jit
 def launch_ray_trace_kernel_DDA(grid, 
                                 start_pos, 
@@ -80,9 +81,12 @@ def launch_ray_trace_kernel_DDA(grid,
     t_max_z = (next_bound_z - z) / ray_dir_z if ray_dir_z != 0 else 1e10
 
     # --- 3. Voxel Traversal Loop ---
+    # Calculate the theoretical maximum steps needed to cross the grid
+    # We add a small buffer (+10) just to be safe against floating point edge cases
+    max_steps = grid_shape[0] + grid_shape[1] + grid_shape[2] + 10
     # We will step a max of 200 voxels (or grid_shape[0] * 2, etc.)
     # to prevent infinite loops from bad inputs.
-    for _ in range(200): # Should be > max(grid_dims)
+    for _ in range(max_steps): # Should be > max(grid_dims)
         
         # 3a. Write to the current voxel (if in bounds)
         if 0 <= curr_vx < grid_shape[0] and \
@@ -130,10 +134,13 @@ def clear_free_space_kernel(grid_tensor: torch.Tensor,
                       // threads_per_block
     
     # 3. Launch the DDA kernel
-    launch_ray_trace_kernel_DDA[blocks_per_grid, threads_per_block](
-        grid_numba_view,
-        start_index,
-        end_indices,
-        grid_shape,
-        min_val
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', category=NumbaPerformanceWarning)
+        
+        launch_ray_trace_kernel_DDA[blocks_per_grid, threads_per_block](
+            grid_numba_view,
+            start_index,
+            end_indices,
+            grid_shape,
+            min_val
+        )

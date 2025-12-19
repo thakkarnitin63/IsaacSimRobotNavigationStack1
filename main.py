@@ -73,7 +73,7 @@ class NavigationSimulator:
         self.physics_context = PhysicsContext()
 
         # --- Define Path ---
-        self.START_POS = np.array([0, 0, 0.1])
+        self.START_POS = np.array([-1.0,-1.0, 0.1])
         self.GOAL_POS = (5.0, 5.0)
         self.waypoint_list = []
         self.current_waypoint_idx = 0
@@ -159,7 +159,7 @@ class NavigationSimulator:
             print("Spawning H1 humanoid robot...")
             
             # Spawn position: left side of warehouse, facing +Y direction
-            spawn_pos = [-7.0, 7.0, 1.05]  # Near left wall
+            spawn_pos = [0, 7.0, 1.05]  # Near left wall
             walk_distance = 5.0  # Walk 3.5 meters (from y=1.0 to y=4.5)
             
             self.h1_humanoid = H1Humanoid(
@@ -349,35 +349,36 @@ class NavigationSimulator:
         
         # --- 6. GLOBAL PLANNER ---
         print(f"Planning global path from {self.START_POS[:2]} to {self.GOAL_POS}...")
-        path, grid_path = self.global_planner.plan_path(self.START_POS[:2], self.GOAL_POS)
-        # if not path:
-        #     carb.log_error("Failed to generate a global path. Exiting.")
-        #     self.simulation_app.close()
-        #     return
-        self.waypoint_list = path
-        # # print("Using SIMPLE STRAIGHT PATH for testing...")
-        # # Create a straight line from (0,0) to (5,5)
-        # num_waypoints = 11
-        # self.waypoint_list = []
-        # for i in range(num_waypoints):
-        #     t = i / (num_waypoints - 1)
-        #     x = 0.0 + t * 5.0  # 0 to 5
-        #     y = 0.0 + t * 5.0  # 0 to 5
-        #     self.waypoint_list.append((x, y))
 
-        print(f"Created {len(self.waypoint_list)} waypoints:")
-        for i, wp in enumerate(self.waypoint_list):
-            print(f"  [{i}]: {wp}")
-        print(f"Global path found with {len(self.waypoint_list)} waypoints.")
+        path_with_heading, grid_path = self.global_planner.plan_path(self.START_POS[:2], self.GOAL_POS)        # if not path:
+        
+        if path_with_heading is None:
+            carb.log_error("Failed to generate a global path. Exiting.")
+            self.simulation_app.close()
+            return
+
+        self.waypoint_list = path_with_heading
+
+
+        print(f"Created {len(self.waypoint_list)} waypoints with heading:")
+        for i in range(min(5, len(self.waypoint_list))):  # Print first 5
+            x, y, theta = self.waypoint_list[i]
+            print(f"  [{i}]: ({x:.2f}, {y:.2f}) theta={math.degrees(theta):.1f}°")
+        if len(self.waypoint_list) > 5:
+            print(f"  ... and {len(self.waypoint_list) - 5} more waypoints")
+
+
         print("\n=== PATH DEBUG ===")
         print(f"Start pose: {self.START_POS[:2]}")
         print(f"Goal pose: {self.GOAL_POS}")
-        print(f"First 3 waypoints from A*:")
+        print(f"First 3 waypoints:")
         for i in range(min(3, len(self.waypoint_list))):
-            print(f"  [{i}]: {self.waypoint_list[i]}")
+            x, y, theta = self.waypoint_list[i]
+            print(f"  [{i}]: ({x:.2f}, {y:.2f}) theta={math.degrees(theta):.1f}°")
         print(f"Last 3 waypoints:")
         for i in range(max(0, len(self.waypoint_list)-3), len(self.waypoint_list)):
-            print(f"  [{i}]: {self.waypoint_list[i]}")
+            x, y, theta = self.waypoint_list[i]
+            print(f"  [{i}]: ({x:.2f}, {y:.2f}) theta={math.degrees(theta):.1f}°")
         print("==================\n")
 
         # --- SAVE PATH VISUALIZATION ---
@@ -398,31 +399,19 @@ class NavigationSimulator:
         
 
         print("INITIALIZING MPPI CONTROLLER")
-        # Convert path to numpy array
-        full_path_array = np.array(self.waypoint_list)
+        # Path is already numpy array [N, 3] with heading
+        full_path_array = self.waypoint_list
         goal_array = np.array(self.GOAL_POS)
 
         # Create MPPI config
-        mppi_config = MPPIConfig(
-            num_samples=1000,          # K trajectories
-            horizon_steps=56,          # T timesteps
-            dt=0.05,                   # 20Hz control
-            v_max=0.5,                 # Max forward velocity
-            v_min=-0.1,                # Allow slight reverse
-            w_max=1.0,                 # Max rotation
-            v_std=0.2,                 # Exploration noise
-            w_std=0.4,
-            lambda_=0.3,               # Temperature
-            lookahead_points=50,       # Path chunk size
-            device='cuda:0'
-        )
+        mppi_config = MPPIConfig()
         # Initialize MPPI with full path
         self.mppi_controller = MPPIController(
             config=mppi_config,
             full_path=full_path_array,
             goal=goal_array
         )
-        print(f"✅ MPPI Controller initialized!")
+        print(f" MPPI Controller initialized!")
         print(f"   Path: {len(full_path_array)} waypoints")
         print(f"   Horizon: {mppi_config.planning_horizon_seconds:.2f}s")
         print(f"   Samples: {mppi_config.num_samples} trajectories")
@@ -486,15 +475,16 @@ class NavigationSimulator:
         Returns the current target and advances to the next if we're close.
         """
         if self.current_waypoint_idx >= len(self.waypoint_list):
-            return None # We have reached the final goal
+            return None  # We have reached the final goal
 
         target_waypoint = self.waypoint_list[self.current_waypoint_idx]
         
-        # Check distance to the current target
-        dist_to_target = np.linalg.norm(current_pose_2d[:2] - target_waypoint)
+        # Check distance to the current target (only x, y)
+        dist_to_target = np.linalg.norm(current_pose_2d[:2] - target_waypoint[:2])
         
         if dist_to_target < self.goal_threshold:
-            # print(f"Reached waypoint {self.current_waypoint_idx}: {target_waypoint}")
+            x, y, theta = target_waypoint
+            print(f"Reached waypoint {self.current_waypoint_idx}: ({x:.2f}, {y:.2f}) theta={math.degrees(theta):.1f}°")
             self.current_waypoint_idx += 1
             
             if self.current_waypoint_idx >= len(self.waypoint_list):
@@ -514,7 +504,7 @@ class NavigationSimulator:
             while self.simulation_app.is_running():
                 dt = self.physics_context.get_physics_dt()
                 if dt < 1e-6: 
-                    dt = 1.0 / 60.0 
+                    dt = 1.0 / 200.0 
                 
                 # Update simulation
                 self.simulation_app.update()
@@ -531,23 +521,13 @@ class NavigationSimulator:
                 # 1. Convert 3D pose to 2D [x, y, theta]
                 yaw = get_yaw_from_quat(orientation_quat)
                 current_pose_2d = np.array([position_3d[0], position_3d[1], yaw])
-                
-                
-                # 2. Get the current target waypoint
-                target_waypoint = self.get_current_target(current_pose_2d)
-                
-                if target_waypoint is None:
-                    # We are done! Stop the robot.
-                    v, w = 0.0, 0.0
-                else:
-                # 3. Process 3D Lidar into 2.5D Height Map
 
-                    # Default to an empty map (or the last known map)
-                    current_pose_tensor = torch.tensor(
-                        current_pose_2d,
-                        dtype=torch.float32,
-                        device='cuda'
-                    )
+                current_pose_tensor = torch.tensor(
+                current_pose_2d,
+                dtype=torch.float32,
+                device='cuda'
+                )
+    
 
 
                 
@@ -610,67 +590,87 @@ class NavigationSimulator:
                     # --- THINK ---
                     # Get the entire path that's left to follow
 
-                    raw_points_np = self.robot.get_lidar_points_in_sensor_frame()
-                    if raw_points_np.size > 0:
-                        # Get sensor pose and robot pose
-                        sensor_pose_np = self.robot.get_sensor_pose_matrix()
-                        robot_pose_np = self.robot.get_robot_pose_vector()
+                raw_points_np = self.robot.get_lidar_points_in_sensor_frame()
+                if raw_points_np.size > 0:
+                    # Get sensor pose and robot pose
+                    sensor_pose_np = self.robot.get_sensor_pose_matrix()
+                    robot_pose_np = self.robot.get_robot_pose_vector()
 
-                        raw_points = torch.from_numpy(raw_points_np).float().cuda()
-                        sensor_pose = torch.from_numpy(sensor_pose_np).float().cuda()
-                        robot_pose = torch.from_numpy(robot_pose_np).float().cuda()
+                    raw_points = torch.from_numpy(raw_points_np).float().cuda()
+                    sensor_pose = torch.from_numpy(sensor_pose_np).float().cuda()
+                    robot_pose = torch.from_numpy(robot_pose_np).float().cuda()
 
-                        costmap_2d = self.stvl.update(raw_points, sensor_pose, robot_pose)
-                        # costmap_np = costmap_2d.cpu().numpy()
-                        costmap_tensor = costmap_2d
+                    costmap_2d = self.stvl.update(raw_points, sensor_pose, robot_pose)
+                    # costmap_np = costmap_2d.cpu().numpy()
+                    costmap_tensor = costmap_2d
+                    
+                    # if i % 5 == 0:  # Update visualization every 10 frames
+                        # self.visualize_costmap(costmap_np, robot_pose_np)
+                        # self.visualize_3d_voxel_grid(robot_pose_np)
+                else:
+                    # No lidar data, use empty costmap
+                    costmap_tensor = torch.zeros((128, 128), dtype=torch.float32, device='cuda')
+                    robot_pose_np = np.array([position_3d[0], position_3d[1], position_3d[2]])
+
+                # path_to_follow = self.waypoint_list[self.current_waypoint_idx:]
+                robot_centric_offset = self.stvl.robot_centric_offset[:2].cpu().numpy()
+                # The "Brain" (MPPI) computes the command
+                grid_origin = robot_pose_np[:2] + robot_centric_offset
+                grid_origin_tensor = torch.tensor(
+                    grid_origin,
+                    dtype=torch.float32,
+                    device='cuda'
+                )
+
+                v, w = self.mppi_controller.compute_control_command(
+                    current_pose=current_pose_tensor,
+                    costmap=costmap_tensor,
+                    grid_origin=grid_origin_tensor
+                )
+                    # if i % 100 == 0:
+                    #     robot_x = robot_pose_np[0]
+                    #     robot_y = robot_pose_np[1]
                         
-                        # if i % 5 == 0:  # Update visualization every 10 frames
-                            # self.visualize_costmap(costmap_np, robot_pose_np)
-                            # self.visualize_3d_voxel_grid(robot_pose_np)
-                    else:
-                        # No lidar data, use empty costmap
-                        costmap_tensor = torch.zeros((128, 128), dtype=torch.float32, device='cuda')
-                        robot_pose_np = np.array([position_3d[0], position_3d[1], position_3d[2]])
-
-                    # path_to_follow = self.waypoint_list[self.current_waypoint_idx:]
-                    robot_centric_offset = self.stvl.robot_centric_offset[:2].cpu().numpy()
-                    # The "Brain" (MPPI) computes the command
-                    grid_origin = robot_pose_np[:2] + robot_centric_offset
-                    grid_origin_tensor = torch.tensor(
-                        grid_origin,
-                        dtype=torch.float32,
-                        device='cuda'
-                    )
-                    v, w = self.mppi_controller.compute_control_command(
-                        current_pose=current_pose_tensor,
-                        costmap=costmap_tensor,
-                        grid_origin=grid_origin_tensor
-                    )
+                    #     print(f"\n🎯 Path Verification:")
+                    #     print(f"   Robot at: ({robot_x:.2f}, {robot_y:.2f})")
+                    #     print(f"   Should be near X=1.0 (error: {abs(robot_x - 1.0):.2f}m)")
+                        
+                    #     # Print path chunk
+                    #     chunk = self.mppi_controller.current_path_chunk
+                    #     if chunk is not None and len(chunk) > 0:
+                    #         print(f"   Path chunk[0]: ({chunk[0][0]:.2f}, {chunk[0][1]:.2f})")
+                    #         if len(chunk) > 5:
+                    #             print(f"   Path chunk[5]: ({chunk[5][0]:.2f}, {chunk[5][1]:.2f})")
+                    #         print(f"   Chunk length: {len(chunk)} waypoints")
+                            
+                    #         # CRITICAL DEBUG: Check if costmap has high costs at path location
+                    #         # This helps identify if obstacle avoidance is fighting path following
+                    #         if costmap_tensor is not None:
+                    #             print(f"   Costmap stats: min={costmap_tensor.min().item():.3f}, "
+                    #                 f"max={costmap_tensor.max().item():.3f}, "
+                    #                 f"mean={costmap_tensor.mean().item():.3f}")
+    
                 
                 # --- ACT ---
                 # The "Driver" (DifferentialController) applies the command
                 self.robot.apply_drive_commands(v, w)
                 
-                # Print for debugging
-                if i % 100 == 0: 
+                if i % 100 == 0:
+                    progress_info = self.mppi_controller.get_progress()
+                    
                     print(f"\n{'='*60}")
                     print(f"--- Frame {i} ---")
                     print(f"{'='*60}")
-                    print(f"  Robot Pose: x={current_pose_2d[0]:.2f}, y={current_pose_2d[1]:.2f}, θ={math.degrees(yaw):.1f}°")
-                    
-                    if target_waypoint is not None:
-                        dist_to_target = np.linalg.norm(current_pose_2d[:2] - np.array(target_waypoint))
-                        print(f"  Target Waypoint: {target_waypoint} (dist={dist_to_target:.2f}m)")
-                        # print(f"  Progress: {self.current_waypoint_idx}/{len(self.waypoint_list)}")
-                    else:
-                        print(f"  ** GOAL REACHED **")
-                    
-    
-                    
-                    # Control command
+                    print(f"  Robot Pose: x={current_pose_2d[0]:.2f}, y={current_pose_2d[1]:.2f}, "
+                        f"θ={math.degrees(yaw):.1f}°")
+                    print(f"  Progress: {progress_info['progress_pct']:.1f}%")
+                    print(f"  Distance to goal: {progress_info['remaining_distance']:.2f}m")
                     print(f"  MPPI Command: v={v:.3f} m/s, ω={w:.3f} rad/s")
+                    print(f"  Costmap stats: min={costmap_tensor.min().item():.3f}, "
+                        f"max={costmap_tensor.max().item():.3f}, "
+                        f"mean={costmap_tensor.mean().item():.3f}")
                     print(f"{'='*60}\n")
-                    
+                
                 i += 1
 
         except KeyboardInterrupt:

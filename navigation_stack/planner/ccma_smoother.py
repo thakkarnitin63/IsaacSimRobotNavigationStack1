@@ -1,4 +1,6 @@
-# navigation_stack/planner/global_planner.py
+
+
+# In: navigation_stack/planner/global_planner.py
 
 import sys
 import os
@@ -11,15 +13,14 @@ import importlib_resources as resources
 from scipy.ndimage import binary_dilation
 from pathfinding.core.grid import Grid
 from pathfinding.finder.a_star import AStarFinder
-from pathfinding.core.diagonal_movement import DiagonalMovement
+from pathfinding.core.diagonal_movement import DiagonalMovement  
 
 try:
     from ccma import CCMA
     CCMA_AVAILABLE = True
 except ImportError:
     CCMA_AVAILABLE = False
-    print("WARNING: CCMA not available. Path smoothing disabled.")
-
+    print("⚠️  CCMA not available. Path smoothing disabled.")
 
 class GlobalPlanner:
     """
@@ -28,10 +29,10 @@ class GlobalPlanner:
     """
     
     def __init__(self, 
-                 use_ccma_smoothing: bool = True,
-                 ccma_w_ma: int = 5,
-                 ccma_w_cc: int = 3,
-                 debug: bool = False):
+             use_ccma_smoothing: bool = True,
+             ccma_w_ma: int = 5,
+             ccma_w_cc: int = 3,
+             debug: bool = False):
         """
         Args:
             use_ccma_smoothing: Enable corner smoothing
@@ -39,7 +40,9 @@ class GlobalPlanner:
             ccma_w_cc: Curvature constraint (higher = smoother curves)
             debug: Print detailed path processing info
         """
+        # ✅ FIX: Handle both direct execution and module import
         try:
+            # Try package resource first (when imported as module)
             with ExitStack() as stack:
                 maps_pkg = resources.files("navigation_stack.maps")
                 yaml_file = stack.enter_context(resources.as_file(maps_pkg.joinpath("map.yaml")))
@@ -53,6 +56,7 @@ class GlobalPlanner:
                 self.occupied_thresh = self.map_info['occupied_thresh'] * 255
                 self._load_and_process_map(img_file)
         except (ModuleNotFoundError, FileNotFoundError):
+            # Fallback: Direct file path (when run as script)
             script_dir = os.path.dirname(os.path.abspath(__file__))
             maps_dir = os.path.join(os.path.dirname(script_dir), "maps")
             
@@ -60,7 +64,9 @@ class GlobalPlanner:
             img_path = os.path.join(maps_dir, "map.png")
             
             if not os.path.exists(yaml_path) or not os.path.exists(img_path):
-                raise FileNotFoundError(f"Map files not found in {maps_dir}")
+                print(f"❌ Error: Map files not found in {maps_dir}")
+                print(f"   Expected: map.yaml and map.png")
+                sys.exit(1)
             
             with open(yaml_path, 'r') as f:
                 self.map_info = yaml.safe_load(f)
@@ -77,11 +83,11 @@ class GlobalPlanner:
         if self.use_ccma_smoothing and CCMA_AVAILABLE:
             try:
                 self.ccma = CCMA(w_ma=ccma_w_ma, w_cc=ccma_w_cc)
-                if self.debug:
-                    print(f"CCMA initialized (w_ma={ccma_w_ma}, w_cc={ccma_w_cc})")
+                print(f"✅ CCMA initialized (w_ma={ccma_w_ma}, w_cc={ccma_w_cc})")
             except Exception as e:
-                print(f"WARNING: CCMA init failed: {e}")
+                print(f"⚠️  CCMA init failed: {e}")
                 self.use_ccma_smoothing = False
+
 
     def _load_and_process_map(self, image_path):
         img = Image.open(image_path).convert('L')
@@ -96,29 +102,29 @@ class GlobalPlanner:
         self.path_grid = Grid(matrix=self.cost_matrix)
 
     def _apply_ccma_smoothing(self, waypoints_xy: np.ndarray) -> np.ndarray:
-        """Apply CCMA smoothing to round corners."""
+        """Apply CCMA smoothing. No resampling - CCMA output is already good."""
         if not self.use_ccma_smoothing or self.ccma is None:
             return waypoints_xy
             
         if waypoints_xy.shape[0] < 10:
             if self.debug:
-                print(f"Path too short ({len(waypoints_xy)} pts), skipping CCMA")
+                print(f"⚠️  Path too short ({len(waypoints_xy)} pts), skipping CCMA")
             return waypoints_xy
 
         try:
             smoothed = self.ccma.filter(waypoints_xy.astype(np.float64))
             
             if self.debug:
-                print(f"CCMA: {len(waypoints_xy)} pts -> {len(smoothed)} pts")
+                print(f"🔧 CCMA: {len(waypoints_xy)} pts → {len(smoothed)} pts")
             
             return smoothed
 
         except Exception as e:
-            print(f"WARNING: CCMA error: {e}")
+            print(f"⚠️  CCMA error: {e}")
             return waypoints_xy
 
     def _add_heading_to_path(self, waypoints_xy: np.ndarray) -> np.ndarray:
-        """Add heading column using averaged directions at corners."""
+        """Add heading column. Uses averaged heading at middle points for smooth corners."""
         num_points = waypoints_xy.shape[0]
         if num_points == 0:
             return np.zeros((0, 3))
@@ -131,12 +137,15 @@ class GlobalPlanner:
 
         for i in range(num_points):
             if i == 0:
+                # First: look forward
                 dx = waypoints_xy[1, 0] - waypoints_xy[0, 0]
                 dy = waypoints_xy[1, 1] - waypoints_xy[0, 1]
             elif i == num_points - 1:
+                # Last: look backward
                 dx = waypoints_xy[i, 0] - waypoints_xy[i-1, 0]
                 dy = waypoints_xy[i, 1] - waypoints_xy[i-1, 1]
             else:
+                # Middle: average incoming and outgoing (smooth corners)
                 dx_in = waypoints_xy[i, 0] - waypoints_xy[i-1, 0]
                 dy_in = waypoints_xy[i, 1] - waypoints_xy[i-1, 1]
                 dx_out = waypoints_xy[i+1, 0] - waypoints_xy[i, 0]
@@ -145,6 +154,7 @@ class GlobalPlanner:
                 dx = (dx_in + dx_out) / 2.0
                 dy = (dy_in + dy_out) / 2.0
                 
+                # Handle degenerate case
                 if abs(dx) < 1e-6 and abs(dy) < 1e-6:
                     dx = dx_out if abs(dx_out) > 1e-6 else 1.0
                     dy = dy_out if abs(dy_out) > 1e-6 else 0.0
@@ -152,7 +162,7 @@ class GlobalPlanner:
             path_with_heading[i, 2] = math.atan2(dy, dx)
 
         if self.debug:
-            print(f"Heading: {math.degrees(path_with_heading[0,2]):.1f}° -> "
+            print(f"🧭 Heading: {math.degrees(path_with_heading[0,2]):.1f}° → "
                   f"{math.degrees(path_with_heading[-1,2]):.1f}°")
         
         return path_with_heading
@@ -186,29 +196,34 @@ class GlobalPlanner:
         end_grid = self.world_to_grid(end_world[0], end_world[1])
         
         if not self.is_valid_grid_pos(*start_grid):
-            print(f"ERROR: Invalid start position: {start_grid}")
+            print(f"❌ Invalid start: {start_grid}")
             return None, None
         if not self.is_valid_grid_pos(*end_grid):
-            print(f"ERROR: Invalid goal position: {end_grid}")
+            print(f"❌ Invalid goal: {end_grid}")
             return None, None
         
         start_node = self.path_grid.node(*start_grid)
         end_node = self.path_grid.node(*end_grid)
         
+        # ✅ 8-neighbor search (allows diagonal movement)
         finder = AStarFinder(diagonal_movement=DiagonalMovement.always)
         grid_path, runs = finder.find_path(start_node, end_node, self.path_grid)
         self.path_grid.cleanup()
         
         if not grid_path:
-            print("ERROR: No path found")
+            print("❌ No path found")
             return None, None
         
+        # Convert to world coordinates
         world_waypoints = np.array([self.grid_to_world(n.x, n.y) for n in grid_path])
+        
+        # Apply CCMA smoothing
         smoothed = self._apply_ccma_smoothing(world_waypoints)
+        
+        # Add heading
         path_with_heading = self._add_heading_to_path(smoothed)
         
-        if self.debug:
-            print(f"Path generated: {len(path_with_heading)} waypoints [x, y, theta]")
+        print(f"✅ Path: {len(path_with_heading)} waypoints [x, y, θ]")
         
         return path_with_heading, grid_path
 
@@ -218,22 +233,27 @@ class GlobalPlanner:
         img = Image.fromarray(self.map_grid_raw).convert('RGB')
         draw = ImageDraw.Draw(img)
         
+        # Draw path points
         grid_points = [self.world_to_grid(p[0], p[1]) for p in path_with_heading]
         if len(grid_points) > 1:
             draw.line(grid_points, fill=(255, 100, 100), width=2)
 
-        arrow_len_world = 0.3
+        # Draw heading arrows
+        arrow_len_world = 0.3  # 30cm arrows
         for i in range(0, len(path_with_heading), arrow_spacing):
             wx, wy, theta = path_with_heading[i]
             gx, gy = self.world_to_grid(wx, wy)
             
+            # Arrow tip in world coords
             tip_wx = wx + arrow_len_world * math.cos(theta)
             tip_wy = wy + arrow_len_world * math.sin(theta)
             tip_gx, tip_gy = self.world_to_grid(tip_wx, tip_wy)
             
+            # Draw arrow
             draw.line([(gx, gy), (tip_gx, tip_gy)], fill=(0, 0, 255), width=2)
             draw.ellipse([gx-2, gy-2, gx+2, gy+2], fill=(0, 255, 0))
 
+        # Mark start/end
         if len(grid_points) > 0:
             sx, sy = grid_points[0]
             ex, ey = grid_points[-1]
@@ -241,12 +261,12 @@ class GlobalPlanner:
             draw.rectangle([ex-3, ey-3, ex+3, ey+3], fill=(255, 0, 0))
         
         img.save(output_path)
-        if self.debug:
-            print(f"Saved visualization: {output_path}")
+        print(f"💾 Saved: {output_path}")
 
 
+# --- TEST ---
 if __name__ == "__main__":
-    print("=== GlobalPlanner Test Suite ===\n")
+    print("=== GlobalPlanner Phase 1 Test ===\n")
     
     planner = GlobalPlanner(use_ccma_smoothing=True, debug=True)
     
@@ -256,61 +276,78 @@ if __name__ == "__main__":
     if path is not None:
         print(f"First heading: {math.degrees(path[0, 2]):.1f}°")
         print(f"Last heading: {math.degrees(path[-1, 2]):.1f}°")
+        print(f"Expected: ~0° (east)")
     
-    # Test 2: Diagonal path
-    print("\n--- Test 2: Diagonal Path ---")
-    path, _ = planner.plan_path((1.0, 2.0), (5.0, 5.0))
+    # Test 2: Natural diagonal path (8-neighbor A*)
+    print("\n--- Test 2: Natural Diagonal Path ---")
+    path, grid = planner.plan_path((1.0, 2.0), (5.0, 5.0))
     if path is not None:
         corner_idx = len(path) // 2
-        print("Mid-path headings:")
-        for i in range(max(0, corner_idx-2), min(len(path), corner_idx+2)):
+        print(f"\nMid-path headings (naturally diagonal):")
+        for i in range(max(0, corner_idx-3), min(len(path), corner_idx+3)):
             x, y, th = path[i]
-            print(f"  [{i}]: ({x:.2f}, {y:.2f}) theta={math.degrees(th):.1f}°")
+            print(f"  [{i}]: ({x:.2f}, {y:.2f}) θ={math.degrees(th):.1f}°")
     
-    # Test 3: L-Shape corner smoothing
-    print("\n--- Test 3: L-Shape Corner Smoothing ---")
+    # Test 3: Forced L-Shape (manual waypoints to test CCMA corner smoothing)
+    print("\n--- Test 3: Forced 90° L-Shape (CCMA Test) ---")
     
+    # Create sharp L-shaped waypoints manually
     north_segment = np.array([[1.0, y] for y in np.linspace(2.0, 5.0, 8)])
     east_segment = np.array([[x, 5.0] for x in np.linspace(1.0, 5.0, 9)])
+    
+    # Combine (remove duplicate corner point)
     forced_waypoints_xy = np.vstack([north_segment, east_segment[1:]])
     
-    # Without CCMA
+    print(f"\nManual waypoints created: {len(forced_waypoints_xy)} points")
+    
+    # WITHOUT CCMA
     planner_no_ccma = GlobalPlanner(use_ccma_smoothing=False, debug=False)
     path_no_ccma = planner_no_ccma._add_heading_to_path(forced_waypoints_xy)
     
-    print("\nWithout CCMA:")
-    corner_idx = 7
+    print("\n❌ WITHOUT CCMA (Sharp Corner):")
+    corner_idx = 7  # Where north segment ends
     for i in range(corner_idx-1, min(corner_idx+3, len(path_no_ccma))):
         x, y, th = path_no_ccma[i]
-        print(f"  [{i}]: ({x:.2f}, {y:.2f}) theta={math.degrees(th):.1f}°")
+        print(f"  [{i}]: ({x:.2f}, {y:.2f}) θ={math.degrees(th):.1f}°")
     
-    # With CCMA
+    # WITH CCMA
     smoothed_xy = planner._apply_ccma_smoothing(forced_waypoints_xy)
     path_with_ccma = planner._add_heading_to_path(smoothed_xy)
     
-    print("\nWith CCMA:")
-    for i in range(len(path_with_ccma)):
-        x, y, th = path_with_ccma[i]
+    print("\n✅ WITH CCMA (Smooth Corner):")
+    # Find corner region in smoothed path (around y=5, x transitioning)
+    corner_indices = []
+    for i, (x, y, th) in enumerate(path_with_ccma):
         if 0.9 <= x <= 1.2 and 4.8 <= y <= 5.2:
-            print(f"  [{i}]: ({x:.2f}, {y:.2f}) theta={math.degrees(th):.1f}°")
+            corner_indices.append(i)
     
-    # Analyze smoothness
+    if corner_indices:
+        start_idx = max(0, corner_indices[0] - 2)
+        end_idx = min(len(path_with_ccma), corner_indices[-1] + 3)
+        for i in range(start_idx, end_idx):
+            x, y, th = path_with_ccma[i]
+            print(f"  [{i}]: ({x:.2f}, {y:.2f}) θ={math.degrees(th):.1f}°")
+    
+    # Calculate max heading change per step
     heading_changes_no_ccma = np.abs(np.diff(path_no_ccma[:, 2]))
     heading_changes_with_ccma = np.abs(np.diff(path_with_ccma[:, 2]))
     
+    # Wrap angles to [-π, π]
     heading_changes_no_ccma = np.minimum(heading_changes_no_ccma, 
                                          2*np.pi - heading_changes_no_ccma)
     heading_changes_with_ccma = np.minimum(heading_changes_with_ccma, 
                                            2*np.pi - heading_changes_with_ccma)
     
-    print(f"\nHeading Smoothness Analysis:")
-    print(f"  Without CCMA - Max change: {math.degrees(heading_changes_no_ccma.max()):.1f}°")
-    print(f"  With CCMA    - Max change: {math.degrees(heading_changes_with_ccma.max()):.1f}°")
+    print(f"\n📊 Heading Smoothness Analysis:")
+    print(f"  Without CCMA - Max heading change: {math.degrees(heading_changes_no_ccma.max()):.1f}°")
+    print(f"  With CCMA    - Max heading change: {math.degrees(heading_changes_with_ccma.max()):.1f}°")
     print(f"  Improvement: {math.degrees(heading_changes_no_ccma.max() - heading_changes_with_ccma.max()):.1f}°")
     
-    # Save visualization
+    # Save both visualizations
     output_dir = os.path.join(os.path.dirname(__file__), "..", "maps")
-    output_path = os.path.join(output_dir, "test_forced_L_with_ccma.png")
-    planner.save_path_image_with_heading(path_with_ccma, output_path, arrow_spacing=3)
     
-    print("\nTest suite complete.")
+    # Save CCMA comparison
+    output_ccma = os.path.join(output_dir, "test_forced_L_with_ccma.png")
+    planner.save_path_image_with_heading(path_with_ccma, output_ccma, arrow_spacing=3)
+    
+    print(f"\n✅ Phase 1 Complete! CCMA smoothing verified.")

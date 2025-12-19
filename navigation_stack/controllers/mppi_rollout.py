@@ -41,14 +41,17 @@ class TrajectoryRollout:
             v =v_samples[:, t]
             w =w_samples[:, t] # At all 1000 trajectory pick given index v / w at time step t
 
+
+            x = x + v * torch.cos(theta) * self.dt
+            y = y + v * torch.sin(theta) * self.dt
+
             # Differntial drive kinematics (vectorized over K!)
             theta = theta + w * self.dt
 
             # Normalise angle to [-pi to pi]
-            theta = torch.atan2(torch.sin(theta), torch.cos(theta))
+            
 
-            x = x + v * torch.cos(theta) * self.dt
-            y = y + v * torch.sin(theta) * self.dt
+            theta = torch.atan2(torch.sin(theta), torch.cos(theta))
 
             # Store this timestep: [K, 3]
             trajectories[:, t, 0] = x

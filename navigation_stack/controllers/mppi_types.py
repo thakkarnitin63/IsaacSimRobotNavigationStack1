@@ -6,26 +6,27 @@ from dataclasses import dataclass
 class MPPIConfig:
     """All hyperparameters in one place"""
     # Sampling 
-    num_samples: int = 1000 # K: Number of Trajectory Samples
+    num_samples: int = 2000 # K: Number of Trajectory Samples
     horizon_steps: int = 56 # T : Planning horizon (timesteps)
     dt: float = 0.05 # 20Hz control   # deltaT: timestep duration (seconds)
+    grid_resolution: float = 0.1 # COSTMAP RESOLUTION
 
     # Robot Limits
     v_max: float = 0.5                # MAX vel
-    v_min: float = -0.2 # Allow reversing # MIN vel
+    v_min: float = -0.35 # Allow reversing # MIN vel
     w_max: float = 1.0                  # MAX angular vel
 
     # Noise (exploration)
-    v_std: float = 0.3             # Linear Velocity noise std dev
-    w_std: float = 0.1              # Angular Velocity noise std dev
+    v_std: float = 0.1           # Linear Velocity noise std dev
+    w_std: float = 0.2              # Angular Velocity noise std dev
+ 
 
     # Temperature (lower = more greedy)
-    lambda_: float = 0.3            
+    lambda_: float = 0.3 
 
-    # Path chunking parameters
-    lookahead_points: int = 50      # How many waypoints to look ahead
-    min_path_points: int = 10       # Minimum points to ensure
-    path_update_distance: float = 0.5  # Update chunk when robot moves this far
+    gamma: float = 0.015          
+
+    
 
     # Device 
     device: str = "cuda:0"

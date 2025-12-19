@@ -1,315 +1,391 @@
 # navigation_stack/controllers/mppi_critic_manager.py
 
 import torch
-from typing import Optional
+from typing import List, Optional, Dict
+from .critic_data import CriticData
 from .mppi_costs import (
-    PathTrackingCost,
+    PathAlignCritic,
     PathAngleCritic,
     PathFollowCritic,
     CostCritic,
-    ObstaclesCritic,
     GoalCritic,
     GoalAngleCritic,
     ConstraintCritic,
-    SmoothnessCritic,
     TwirlingCritic,
     PreferForwardCritic,
-    DeadbandCritic
+    DeadbandCritic,
 )
+
 
 class CriticManager:
     """
     Manage all MPPI critics and combines their costs
 
-    This is central hub that:
-    1. Initializes all critics with weights
-    2. Calls each critic's compute() method
-    3. Sums up all costs for trajectory ranking
+    This is the central hub that:
+    1. Initializes all critics with their weights
+    2. Prepares unified CriticData structure
+    3. Calls each critic's compute() method
+    4. Tracks statistics (optional)
+    5. Sums up costs for trajectory ranking
 
-    Usage: 
+    Usage:
+        # Initialize
         manager = CriticManager(config)
-        total_costs = manager.evaluate_trajectories(
+        
+        # Every MPPI cycle:
+        data = manager.prepare_critic_data(
             trajectories, v_samples, w_samples,
-            path, goal, current_pose, costmap, grid_origin, dt
+            path_tracker, costmap, grid_origin, ...
         )
+        total_costs = manager.evaluate_trajectories(data)
+    
+    Key Features:
+    - Unified CriticData structure (matches Nav2)
+    - Lazy path validity computation (only when needed)
+    - Optional statistics tracking
+    - Early exit on fail_flag
     """
     def __init__(
         self,
         # Obstacle avoidance weights
-        cost_critic_weight: float = 50.0,
-        obstacles_critic_weight: float = 50.0,
+        cost_critic_weight: float = 3.81,
         
         # Path following weights
-        path_tracking_weight: float = 10.0,
-        path_angle_weight: float = 15.0,
-        path_follow_weight: float = 12.0,
+        path_align_weight: float = 10.0,
+        path_angle_weight: float = 2.2,
+        path_follow_weight: float = 5.0,
         
         # Goal reaching weights
-        goal_weight: float = 15.0,
-        goal_angle_weight: float = 8.0,
+        goal_weight: float = 5.0,
+        goal_angle_weight: float = 3.0,
         
         # Motion quality weights
-        constraint_weight: float = 10.0,
-        smoothness_weight: float = 10.0,
-        twirling_weight: float = 15.0,
-        prefer_forward_weight: float = 15.0,
+        constraint_weight: float = 4.0,
+        # smoothness_weight: float = 5.0,
+        twirling_weight: float = 10.0,
+        prefer_forward_weight: float = 5.0,
         
-        # Optional critic
+        # Optional critics
         use_deadband_critic: bool = False,
-        deadband_weight: float = 5.0,
+        deadband_weight: float = 35.0,
         
         # Critic parameters
         resolution: float = 0.1,
-        v_max: float = 0.5,
-        v_min: float = -0.1,
-        w_max: float = 1.0,
         
-        # Path/Goal thresholds
-        goal_distance_threshold: float = 2.0,
-        goal_angle_threshold: float = 0.8,
-        twirling_threshold: float = 0.5,
+        # Enable/disable critics
+        enable_cost_critic: bool = True,
+        enable_path_align: bool = True,
+        enable_path_angle: bool = True,
+        enable_path_follow: bool = True,
+        enable_goal: bool = True,
+        enable_goal_angle: bool = True,
+        enable_constraint: bool = True,
+        # enable_smoothness: bool = True,
+        enable_twirling: bool = True,
+        enable_prefer_forward: bool = True,
         
-        # Optional: Fixed goal heading
-        goal_heading: Optional[float] = None):
-         
+        # Statistics
+        publish_stats: bool = False,
+        verbose: bool = False
+        ):
         """
-        Initialize all critics with their weights and parameters.
+        Initialize CriticManager with all critics.
         
         Args:
-            *_weight: Weight multipliers for each critic (higher = more important)
-            use_deadband_critic: Whether to use optional deadband critic
+            *_weight: Weight multipliers for each critic
+            use_deadband_critic: Whether to use deadband critic
             resolution: Costmap resolution (meters per cell)
-            v_max, v_min, w_max: Velocity constraints
-            goal_distance_threshold: Distance to activate GoalCritic
-            goal_angle_threshold: Distance to activate GoalAngleCritic
-            twirling_threshold: Distance to activate TwirlingCritic
-            goal_heading: Optional fixed goal heading (radians)
+            enable_*: Enable/disable individual critics
+            publish_stats: Track and print statistics
+            verbose: Print detailed debug info
         """
-        # Obstacle Avoidance Critics:
-        self.cost_critic = CostCritic(
-            weight=cost_critic_weight,
-            critical_threshold=0.8,
-            lethal_threshold=0.95,
-            critical_cost=300.0,
-            lethal_cost=1e6,
-            stride=5,
-            resolution=resolution
-        )
-        
-        self.obstacles_critic = ObstaclesCritic(
-            weight=obstacles_critic_weight,
-            critical_threshold=0.8,
-            lethal_threshold=0.95,
-            critical_cost=300.0,
-            collision_cost=1e6,
-            stride=5,
-            resolution=resolution,
-            repulsion_weight=2.0
-        )
+        self.resolution = resolution
+        self.publish_stats = publish_stats
+        self.verbose = verbose
 
-        # Path following critics
+        # Statistics tracking
+        self.stats_history: List[Dict] = []
+        self._cycle_count = 0
 
-        self.path_tracking_critic = PathTrackingCost(
-            weight=path_tracking_weight
-        )
+        self.critics = []  # List of active critics
+        self.critic_names = []  # Names for debugging
         
-        self.path_angle_critic = PathAngleCritic(
-            weight=path_angle_weight,
-            offset_from_furthest=15,
-            max_angle_to_furthest=1.57,  # ~90 degrees
-            stride=5
-        )
-        
-        self.path_follow_critic = PathFollowCritic(
-            weight=path_follow_weight,
-            offset_from_furthest=20
-        )
+        # Obstacle Avoidance
 
-        # Goal reaching Critics
-        self.goal_critic = GoalCritic(
-            weight=goal_weight,
-            threshold_to_consider=goal_distance_threshold
-        )
-        
-        self.goal_angle_critic = GoalAngleCritic(
-            weight=goal_angle_weight,
-            threshold_to_consider=goal_angle_threshold,
-            goal_heading=goal_heading
-        )
+        if enable_cost_critic and cost_critic_weight > 0:
+            self.critics.append(CostCritic(
+                weight=cost_critic_weight,
+                resolution=resolution
+            ))
+            self.critic_names.append("CostCritic")
 
-        # Motion Quality Critics
-        self.constraint_critic = ConstraintCritic(
-            weight=constraint_weight,
+        # Path Following
+        if enable_path_align and path_align_weight > 0:
+            self.critics.append(PathAlignCritic(weight=path_align_weight))
+            self.critic_names.append("PathAlignCritic")
+        
+        if enable_path_angle and path_angle_weight > 0:
+            self.critics.append(PathAngleCritic(weight=path_angle_weight))
+            self.critic_names.append("PathAngleCritic")
+        
+        if enable_path_follow and path_follow_weight > 0:
+            self.critics.append(PathFollowCritic(weight=path_follow_weight))
+            self.critic_names.append("PathFollowCritic")
+
+        # Goal Reaching
+        if enable_goal and goal_weight > 0:
+            self.critics.append(GoalCritic(weight=goal_weight))
+            self.critic_names.append("GoalCritic")
+        
+        if enable_goal_angle and goal_angle_weight > 0:
+            self.critics.append(GoalAngleCritic(weight=goal_angle_weight))
+            self.critic_names.append("GoalAngleCritic")
+        
+        # Motion Quality
+        if enable_constraint and constraint_weight > 0:
+            self.critics.append(ConstraintCritic(weight=constraint_weight))
+            self.critic_names.append("ConstraintCritic")
+        
+        # if enable_smoothness and smoothness_weight > 0:
+        #     self.critics.append(SmoothnessCritic(weight=smoothness_weight))
+        #     self.critic_names.append("SmoothnessCritic")
+        
+        if enable_twirling and twirling_weight > 0:
+            self.critics.append(TwirlingCritic(weight=twirling_weight))
+            self.critic_names.append("TwirlingCritic")
+        
+        if enable_prefer_forward and prefer_forward_weight > 0:
+            self.critics.append(PreferForwardCritic(weight=prefer_forward_weight))
+            self.critic_names.append("PreferForwardCritic")
+        
+        # Optional Deadband
+        if use_deadband_critic and deadband_weight > 0:
+            self.critics.append(DeadbandCritic(weight=deadband_weight))
+            self.critic_names.append("DeadbandCritic")
+
+
+        print(f" CriticManager initialized with {len(self.critics)} critics:")
+        for name in self.critic_names:
+            print(f"   - {name}") 
+
+    def prepare_critic_data(
+        self,
+        trajectories: torch.Tensor,
+        v_samples: torch.Tensor,
+        w_samples: torch.Tensor,
+        path_tracker,  # PathTracker instance
+        costmap: torch.Tensor,
+        grid_origin: torch.Tensor,
+        current_pose: torch.Tensor,
+        dt: float,
+        v_max: float,
+        v_min: float,
+        w_max: float,
+        compute_path_validity: bool = True
+    ) -> CriticData:
+        """
+        Prepare unified CriticData structure for all critics.
+        
+        This is called ONCE per MPPI optimization cycle.
+        
+        Args:
+            trajectories: [K, T, 3] sampled trajectories
+            v_samples: [K, T] linear velocity samples
+            w_samples: [K, T] angular velocity samples
+            path_tracker: PathTracker instance (contains path state)
+            costmap: [H, W] STVL costmap
+            grid_origin: [2] costmap origin
+            current_pose: [3] robot pose (x, y, theta)
+            dt: Timestep
+            v_max, v_min, w_max: Velocity limits
+            compute_path_validity: Whether to compute path validity
+        
+        Returns:
+            CriticData: Unified data structure for all critics
+        """
+        # Get path and goal from tracker
+        path = path_tracker.full_path  # [N, 3] on GPU
+        goal = path_tracker.goal[:2]   # [2] XY only
+        goal_heading = path_tracker.goal_heading
+        
+        # Get PathTracker state
+        furthest_idx = path_tracker.furthest_reached_idx
+        pruned_path = path_tracker.full_path[furthest_idx:] # Path ahead of robot
+        
+        if len(pruned_path) >1:
+            diffs = pruned_path[1:, :2] - pruned_path[:-1, :2]
+            segment_distances = torch.norm(diffs, dim=1)
+            pruned_path_distances = torch.cat([
+                torch.zeros(1, device=path_tracker.device),
+                torch.cumsum(segment_distances, dim=0)
+            ])
+        else:
+            pruned_path_distances = torch.zeros(1, device=path_tracker.device)
+
+        if path_tracker.path_valid_flags is not None:
+            pruned_path_valid_flags = path_tracker.path_valid_flags[furthest_idx:]
+        else:
+            pruned_path_valid_flags = None
+
+
+        path_integrated_distances = path_tracker.path_integrated_distances
+        local_path_length = path_tracker.local_path_length()
+        
+        # Compute path validity (ONCE per cycle, not every frame!)
+        # This is the answer to your question!
+        if compute_path_validity:
+            path_tracker.compute_path_validity(
+                costmap=costmap,
+                grid_origin=grid_origin,
+                resolution=self.resolution,
+                critical_threshold=1.0
+            )
+            # Re prune after computing
+            if path_tracker.path_valid_flags is not None:
+                pruned_path_valid_flags = path_tracker.path_valid_flags[furthest_idx:]
+   
+        path_valid_flags = path_tracker.path_valid_flags
+        
+        # Create unified data structure
+        data = CriticData(
+            # Trajectories
+            trajectories=trajectories,
+            v_samples=v_samples,
+            w_samples=w_samples,
+            
+            # Path state
+            path=pruned_path,
+            goal=goal,
+            goal_heading=goal_heading,
+            
+            # PathTracker state
+            furthest_reached_idx=0,
+            path_valid_flags=pruned_path_valid_flags,
+            path_integrated_distances=pruned_path_distances,
+
+            local_path_length=local_path_length,
+            
+            # Robot state
+            current_pose=current_pose,
+            
+            # Perception
+            costmap=costmap,
+            grid_origin=grid_origin,
+            
+            # Time
+            dt=dt,
+            
+            # Robot limits
             v_max=v_max,
             v_min=v_min,
             w_max=w_max
         )
         
-        self.smoothness_critic = SmoothnessCritic(
-            weight=smoothness_weight,
-            v_weight=1.0,
-            w_weight=1.0
-        )
-        
-        self.twirling_critic = TwirlingCritic(
-            weight=twirling_weight,
-            goal_dist_threshold=twirling_threshold
-        )
-        
-        self.prefer_forward_critic = PreferForwardCritic(
-            weight=prefer_forward_weight,
-            threshold=0.05
-        )
+        return data 
 
-        # Deadband Critics
 
-        self.use_deadband = use_deadband_critic
-        if use_deadband_critic:
-            self.deadband_critic = DeadbandCritic(
-                weight=deadband_weight,
-                v_deadband=0.03,
-                w_deadband=0.05
-            )
-        else:
-            self.deadband_critic = None
 
-    def evaluate_trajectories(
-        self,
-        trajectories: torch.Tensor, # [K, T, 3] - Sample Trajectories
-        v_samples: torch.Tensor,    # [K, T] - velocity samples
-        w_samples: torch.Tensor,    # [K, T] - angular velocity samples
-        path: torch.Tensor,         # [P, 2] - global path (XY only)
-        goal: torch.Tensor,         # [2] - final goal position
-        current_pose: torch.Tensor, #[3]- current robot pose (X, Y, Theta)
-        costmap: torch.Tensor,      #[H, W] - STVL costmap (0-1)
-        grid_origin: torch.Tensor,  #[2] - costmap origin (robot-centric)
-        dt: float                   # Timestep
-    )-> torch.Tensor:
+    def evaluate_trajectories(self, data: CriticData) -> torch.Tensor:
         """
-        Evaluate all critics and return total cost for each trajectory.
+        Evaluate all critics and return total cost.
+        
+        Matches Nav2's evalTrajectoriesScores() function.
         
         Args:
-            trajectories: K sampled trajectories over T timesteps
-            v_samples: Linear velocity samples
-            w_samples: Angular velocity samples
-            path: Global path waypoints (XY coordinates only)
-            goal: Final goal position (XY)
-            current_pose: Current robot state (x, y, theta)
-            costmap: Robot-centric STVL costmap
-            grid_origin: Costmap origin in world frame
-            dt: Timestep duration
+            data: Unified CriticData structure
         
         Returns:
-            total_costs: [K] - Total cost for each trajectory
-                        (Lower cost = better trajectory)
+            total_costs: [K] Total cost for each trajectory
         """
-        K = trajectories.shape[0]
-        device = trajectories.device
+        K = data.trajectories.shape[0]
+        device = data.trajectories.device
         
-        # Initialize total costs
+        # Initialize costs
         total_costs = torch.zeros(K, device=device)
-
-        #Obstacle avoidance 
-        # Direct costmap lookup
-        total_costs += self.cost_critic.compute(
-            trajectories, costmap, grid_origin
-        )
         
-        # Distance-based obstacle cost
-        total_costs += self.obstacles_critic.compute(
-            trajectories, costmap, grid_origin
-        )
-
-        #Path Following 
-        # Stay close to path
-        total_costs += self.path_tracking_critic.compute(
-            trajectories, path
-        )
+        # Track statistics if enabled
+        stats = {}
+        if self.publish_stats:
+            stats['cycle'] = self._cycle_count
+            stats['critics'] = []
+            stats['costs_before'] = []
+            stats['costs_after'] = []
+            stats['costs_added'] = []
         
-        # Point toward path
-        total_costs += self.path_angle_critic.compute(
-            trajectories, path, current_pose
-        )
+        # Evaluate each critic
+        fail_flag = False
+        for i, (critic, name) in enumerate(zip(self.critics, self.critic_names)):
+            # Early exit on failure (matches Nav2)
+            if fail_flag:
+                if self.verbose:
+                    print(f"⚠️  Early exit: fail_flag set by previous critic")
+                break
+            
+            # Store costs before (for statistics)
+            if self.publish_stats:
+                costs_before = total_costs.clone()
+            
+            # Compute critic cost
+            try:
+                critic_cost = critic.compute(data)
+                total_costs += critic_cost
+                
+                # Check for failures (all trajectories in collision)
+                # This is set by CostCritic if all trajectories collide
+                if hasattr(data, 'fail_flag'):
+                    fail_flag = data.fail_flag
+                
+            except Exception as e:
+                print(f"❌ Critic {name} failed: {e}")
+                # Continue with other critics
+                continue
+            
+            # Track statistics
+            if self.publish_stats:
+                costs_after = total_costs.clone()
+                costs_added = costs_after - costs_before
+                
+                stats['critics'].append(name)
+                stats['costs_before'].append(costs_before.mean().item())
+                stats['costs_after'].append(costs_after.mean().item())
+                stats['costs_added'].append(costs_added.sum().item())
         
-        # Drive toward specific path point
-        total_costs += self.path_follow_critic.compute(
-            trajectories, path
-        )
-
-        # Goal Reaching
-
-        # Attract to goal position
-        total_costs += self.goal_critic.compute(
-            trajectories, goal, current_pose
-        )
+        # Store statistics
+        if self.publish_stats:
+            self.stats_history.append(stats)
+            
+            # Print every N cycles
+            if self._cycle_count % 50 == 0:
+                self.print_statistics(stats)
         
-        # Align with goal heading
-        total_costs += self.goal_angle_critic.compute(
-            trajectories, goal, current_pose, path=path
-        )
-
-        #Motion Quality
-        # Enforce velocity limits
-        total_costs += self.constraint_critic.compute(
-            v_samples, w_samples
-        )
-        
-        # Smooth motion (reduce jerk)
-        total_costs += self.smoothness_critic.compute(
-            v_samples, w_samples
-        )
-        
-        # Reduce excessive rotation
-        total_costs += self.twirling_critic.compute(
-            w_samples, goal, current_pose
-        )
-        
-        # Prefer forward motion
-        total_costs += self.prefer_forward_critic.compute(
-            v_samples
-        )
-
-        # Deadband 
-
-        if self.use_deadband:
-            total_costs += self.deadband_critic.compute(
-                v_samples, w_samples
-            )
+        self._cycle_count += 1
         
         return total_costs
     
-    def get_weights_summary(self) -> dict:
-        """
-        Get current critic weights for debugging/tuning.
+    def print_statistics(self, stats: Dict):
+        """Print critic statistics (matches Nav2's stats publishing)."""
+        print(f"\n📊 Critic Statistics (Cycle {stats['cycle']}):")
+        print(f"{'Critic':<20} {'Cost Added':>15} {'Mean Before':>15} {'Mean After':>15}")
+        print("-" * 70)
         
-        Returns:
-            Dictionary of critic names and their weights
-        """
-        weights = {
-            "obstacle_avoidance": {
-                "cost_critic": self.cost_critic.weight,
-                "obstacles_critic": self.obstacles_critic.weight,
-            },
-            "path_following": {
-                "path_tracking": self.path_tracking_critic.weight,
-                "path_angle": self.path_angle_critic.weight,
-                "path_follow": self.path_follow_critic.weight,
-            },
-            "goal_reaching": {
-                "goal": self.goal_critic.weight,
-                "goal_angle": self.goal_angle_critic.weight,
-            },
-            "motion_quality": {
-                "constraint": self.constraint_critic.weight,
-                "smoothness": self.smoothness_critic.weight,
-                "twirling": self.twirling_critic.weight,
-                "prefer_forward": self.prefer_forward_critic.weight,
-            }
-        }
+        for i, name in enumerate(stats['critics']):
+            cost_added = stats['costs_added'][i]
+            mean_before = stats['costs_before'][i]
+            mean_after = stats['costs_after'][i]
+            
+            # Highlight significant contributions
+            marker = "🔥" if abs(cost_added) > 100 else "  "
+            
+            print(f"{marker} {name:<18} {cost_added:>15.2f} "
+                  f"{mean_before:>15.2f} {mean_after:>15.2f}")
         
-        if self.use_deadband:
-            weights["motion_quality"]["deadband"] = self.deadband_critic.weight
-        
+        print("-" * 70)
+    
+    def get_weights_summary(self) -> Dict[str, float]:
+        """Get current critic weights for debugging/tuning."""
+        weights = {}
+        for critic, name in zip(self.critics, self.critic_names):
+            weights[name] = critic.weight
         return weights
     
     def update_weight(self, critic_name: str, new_weight: float):
@@ -317,32 +393,43 @@ class CriticManager:
         Update a critic's weight dynamically (for tuning).
         
         Args:
-            critic_name: Name of the critic (e.g., "path_tracking", "obstacles")
+            critic_name: Name of critic (e.g., "PathAlignCritic")
             new_weight: New weight value
-        
-        Example:
-            manager.update_weight("twirling", 30.0)  # Increase twirling penalty
         """
-        critic_map = {
-            "cost": self.cost_critic,
-            "obstacles": self.obstacles_critic,
-            "path_tracking": self.path_tracking_critic,
-            "path_angle": self.path_angle_critic,
-            "path_follow": self.path_follow_critic,
-            "goal": self.goal_critic,
-            "goal_angle": self.goal_angle_critic,
-            "constraint": self.constraint_critic,
-            "smoothness": self.smoothness_critic,
-            "twirling": self.twirling_critic,
-            "prefer_forward": self.prefer_forward_critic,
+        for critic, name in zip(self.critics, self.critic_names):
+            if name == critic_name:
+                critic.weight = new_weight
+                print(f"✅ Updated {critic_name} weight: {new_weight}")
+                return
+        
+        print(f"❌ Unknown critic: {critic_name}")
+        print(f"Available: {self.critic_names}")
+    
+    def reset_statistics(self):
+        """Reset statistics tracking."""
+        self.stats_history.clear()
+        self._cycle_count = 0
+    
+    def get_statistics_summary(self) -> Dict:
+        """Get summary of all tracked statistics."""
+        if not self.stats_history:
+            return {}
+        
+        summary = {
+            'total_cycles': len(self.stats_history),
+            'critics': self.critic_names,
+            'average_costs': {}
         }
         
-        if self.use_deadband:
-            critic_map["deadband"] = self.deadband_critic
+        # Compute averages
+        for name in self.critic_names:
+            costs = []
+            for stats in self.stats_history:
+                if name in stats['critics']:
+                    idx = stats['critics'].index(name)
+                    costs.append(stats['costs_added'][idx])
+            
+            if costs:
+                summary['average_costs'][name] = sum(costs) / len(costs)
         
-        if critic_name in critic_map:
-            critic_map[critic_name].weight = new_weight
-            print(f"Updated {critic_name} weight to {new_weight}")
-        else:
-            print(f"Unknown critic: {critic_name}")
-            print(f"Available: {list(critic_map.keys())}")
+        return summary

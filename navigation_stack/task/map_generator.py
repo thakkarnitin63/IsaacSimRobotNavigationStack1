@@ -146,8 +146,20 @@ class MapGenerator:
         width, height = dims[0], dims[1]
         print(f"Map dimensions: {width} x {height}")
 
-        # 6. Save PNG Image
-        image_data = (255 - (np.array(buffer) * 255)).astype(np.uint8)
+        # Convert buffer to numpy array
+        buff_arr = np.array(buffer)
+
+       # Create an empty image array (initialized to Gray/Unknown)
+        # Standard ROS map: 205=Unknown (light gray) or 127=Unknown (dark gray)
+        image_data = np.full(buff_arr.shape, 127, dtype=np.uint8)
+
+        # Apply masks
+        # Free (0) -> White (255)
+        image_data[buff_arr == 0] = 255
+        
+        # Occupied (1) -> Black (0)
+        image_data[buff_arr == 1] = 0
+        
         image_data = image_data.reshape((height, width))
         img = Image.fromarray(image_data, mode='L')
         os.makedirs(self._maps_dir, exist_ok=True)
