@@ -81,6 +81,11 @@ class STVL_System:
             **frustum_params, device=self.device
         )
 
+        self.INFLATION_RADIUS = config['stvl'].get('inflation_radius', 3)  # voxels
+        self.INFLATION_SCALE = config['stvl'].get('inflation_scale', 0.8)  # decay factor
+
+         # Pre-compute inflation kernel (Gaussian-like decay)
+        self._inflation_kernel = self._create_inflation_kernel()
         
         print("STVL System Initialized!")
         print(f"  Grid: {self.grid_dims[0]}×{self.grid_dims[1]}×{self.grid_dims[2]} voxels")
@@ -248,6 +253,89 @@ class STVL_System:
         ] = self.MAX_OCCUPANCY
 
 
+    def _create_inflation_kernel(self):
+        """
+        Inflation kernel with max cost BELOW collision threshold.
+        
+        Your CostCritic thresholds:
+        - collision_threshold: 0.95 (LETHAL)
+        - critical_threshold: 0.90 (HIGH PENALTY)
+        
+        So inflation max should be ~0.90 (triggers critical, not collision)
+        """
+        radius = self.INFLATION_RADIUS
+        scale = self.INFLATION_SCALE
+        
+        y, x = torch.meshgrid(
+            torch.arange(-radius, radius + 1, device=self.device, dtype=torch.float32),
+            torch.arange(-radius, radius + 1, device=self.device, dtype=torch.float32),
+            indexing='ij'
+        )
+        distance = torch.sqrt(x**2 + y**2)
+        
+        # ══════════════════════════════════════════════════════════════
+        # KEY: Max inflated cost = 0.90 (just below collision_threshold)
+        # Only actual obstacles (from mark_obstacles) get 1.0
+        # ══════════════════════════════════════════════════════════════
+        max_inflated = 0.90
+        
+        # Exponential decay
+        kernel = max_inflated * torch.exp(-scale * distance / radius)
+        
+        # Beyond radius = 0
+        kernel[distance > radius] = 0.0
+        
+        # Debug
+        print(f"  Inflation kernel:")
+        print(f"    Radius: {radius} voxels ({radius * self.voxel_size:.2f}m)")
+        print(f"    Scale: {scale}")
+        print(f"    Max cost: {max_inflated} (below collision_threshold=0.95)")
+        print(f"    Profile: ", end="")
+        for d in range(radius + 1):
+            cost = kernel[radius, radius + d].item()
+            print(f"d{d}={cost:.2f} ", end="")
+        print()
+        
+        return kernel.unsqueeze(0).unsqueeze(0)
+    
+
+    def _inflate_costmap(self, costmap_2d: torch.Tensor) -> torch.Tensor:
+        """
+        Apply ADDITIVE inflation (not max).
+        
+        Obstacles stay at 1.0, nearby cells get partial cost.
+        """
+        if self.INFLATION_RADIUS <= 0:
+            return costmap_2d
+        
+        # Find obstacle cells only (not already-inflated areas)
+        obstacle_mask = (costmap_2d >= 0.9).float()
+        
+        # Reshape for conv2d
+        obstacle_4d = obstacle_mask.unsqueeze(0).unsqueeze(0)
+        
+        # Pad
+        pad = self.INFLATION_RADIUS
+        obstacle_padded = torch.nn.functional.pad(
+            obstacle_4d, (pad, pad, pad, pad), mode='constant', value=0
+        )
+        
+        # Convolve to spread influence
+        inflated = torch.nn.functional.conv2d(
+            obstacle_padded,
+            self._inflation_kernel,
+            padding=0
+        )
+        
+        # Take max of original and inflated (obstacles stay at 1.0)
+        result = torch.max(costmap_2d.unsqueeze(0).unsqueeze(0), inflated)
+        
+        # Clamp to [0, 1]
+        result = torch.clamp(result, 0.0, 1.0)
+        
+        return result.squeeze(0).squeeze(0)
+
+
     def get_costmap(self):
         """
         Generate 2D costmap for MPPI local planner.
@@ -258,8 +346,11 @@ class STVL_System:
         # Project 3D → 2D (max occupancy in vertical column)
         costmap_2d, _ = torch.max(self.stvl_grid, dim=2)
         
+        # Apply inflation for safety buffer
+        costmap_inflated = self._inflate_costmap(costmap_2d)
         # Threshold to binary (for MPPI cost function)
-        return (costmap_2d > self.COSTMAP_THRESHOLD).float()
+        # return (costmap_2d > self.COSTMAP_THRESHOLD).float()
+        return costmap_inflated
 
     def _transform_points(self, 
                           points: torch.Tensor, 

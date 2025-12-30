@@ -10,6 +10,7 @@ import torch
 import numpy as np
 
 
+
 # --- 1. ARGUMENT PARSING ---
 parser = argparse.ArgumentParser()
 parser.add_argument("--headless", action="store_true", help="Run in headless mode (no GUI)")
@@ -85,12 +86,12 @@ class NavigationSimulator:
         self.lidar_to_base_quat = None
         
         # --- Human actor ---
-        self.h1_humanoid = None
-        self.h1_timeline_sub = None
+        self.h1_humanoids = []  # List to store multiple humanoids
+        self.h1_timeline_subs = []
 
         # --- Initialize all our modules ---
         print("Initializing navigation modules...")
-        self.global_planner = GlobalPlanner()
+        self.global_planner = GlobalPlanner(debug= True)
         # Define our grid properties
         # self.height_map_processor = HeightMapProcessor(
         #     grid_resolution=0.05,  # 5cm per cell
@@ -153,41 +154,221 @@ class NavigationSimulator:
         draw.draw_points(point_list, colors, sizes)
         print(f"   ✓ Drew {len(point_list)} points (sampled from {len(points_world)})")
 
-    def setup_h1_humanoid(self):
-        """Spawn H1 humanoid robot that walks straight."""
+    # def setup_h1_humanoid(self):
+    #     """Spawn H1 humanoid robot that walks straight."""
+    #     try:
+    #         print("Spawning H1 humanoid robot...")
+            
+    #         # Spawn position: left side of warehouse, facing +Y direction
+    #         spawn_pos = [0, 4.0, 1.05]  # Near left wall
+    #         walk_distance = 5.0  # Walk 3.5 meters (from y=1.0 to y=4.5)
+            
+    #         self.h1_humanoid = H1Humanoid(
+    #             world=self.world,
+    #             spawn_position=spawn_pos,
+    #             walk_distance=walk_distance
+    #         )
+            
+    #         if self.h1_humanoid.spawn():
+    #             # Add physics callback
+    #             self.world.add_physics_callback(
+    #                 "h1_physics_step",
+    #                 callback_fn=self.h1_humanoid.on_physics_step
+    #             )
+                
+    #             # Add timeline event callback
+    #             timeline = omni.timeline.get_timeline_interface()
+    #             self.h1_timeline_sub = timeline.get_timeline_event_stream().create_subscription_to_pop_by_type(
+    #                 int(omni.timeline.TimelineEventType.PLAY),
+    #                 self.h1_humanoid.on_timeline_event
+    #             )
+                
+    #             print("✓ H1 humanoid ready to walk")
+    #         else:
+    #             self.h1_humanoid = None
+    #     except Exception as e:
+    #         print(f" Failed to spawn H1: {e}")
+    #         self.h1_humanoid = None
+
+    def setup_h1_humanoids(self):
+        """
+        Spawn 10 H1 humanoid robots along the diagonal path.
+        
+        Strategy:
+        - Place humanoids at intervals along diagonal from (-1,-1) to (5,5)
+        - Give them different walking patterns:
+          1. Cross path (perpendicular)
+          2. Walk along path (same direction)
+          3. Walk against path (opposite direction)
+          4. Stand still (stationary obstacles)
+        """
         try:
-            print("Spawning H1 humanoid robot...")
+            print("\n" + "="*70)
+            print("Spawning 10 H1 Humanoid Robots Along Path")
+            print("="*70)
             
-            # Spawn position: left side of warehouse, facing +Y direction
-            spawn_pos = [0, 7.0, 1.05]  # Near left wall
-            walk_distance = 5.0  # Walk 3.5 meters (from y=1.0 to y=4.5)
+            # Define spawn configurations
+            # Format: (position, walk_direction, walk_distance, description)
+            humanoid_configs = [
+            # ═══════════════════════════════════════════════════════════════
+            # DEMO SCENARIO: Obstacle Course for Video
+            # Robot path: (-1,-1) → (5,5) diagonal
+            # ═══════════════════════════════════════════════════════════════
             
-            self.h1_humanoid = H1Humanoid(
-                world=self.world,
-                spawn_position=spawn_pos,
-                walk_distance=walk_distance
-            )
+            # 1. EARLY BLOCKER - Stationary on path (forces initial detour)
+            {
+                'position': [0.5, 0.5, 1.05],
+                'walk_direction': np.array([0, 0, 0]),
+                'walk_distance': 0.0,
+                'description': 'Stationary blocker (early path)'
+            },
             
-            if self.h1_humanoid.spawn():
-                # Add physics callback
-                self.world.add_physics_callback(
-                    "h1_physics_step",
-                    callback_fn=self.h1_humanoid.on_physics_step
+            # 2. CROSSING PEDESTRIAN - Walks across path from left
+            {
+                'position': [1.0, 2.5, 1.05],
+                'walk_direction': np.array([1, -1, 0]) / np.sqrt(2),  # Diagonal toward path
+                'walk_distance': 1.2,
+                'description': 'Crossing from left'
+            },
+            
+            # # 3. MID-PATH BLOCKER - Stationary, forces second detour
+            {
+                'position': [2.5, 2.5, 1.05],
+                'walk_direction': np.array([0, 0, 0]),
+                'walk_distance': 0.0,
+                'description': 'Stationary blocker (mid path)'
+            },
+            
+            # # # 4. PARALLEL WALKER - Walking same direction as robot (robot overtakes)
+            {
+                'position': [3.0, 2.5, 1.05],
+                'walk_direction': np.array([1, 1, 0]) / np.sqrt(2),  # Same direction as robot
+                'walk_distance': 1.5,
+                'description': 'Walking parallel (slow)'
+            },
+            
+            # 5. APPROACHING FROM GOAL - Walks toward robot (head-on scenario)
+            # {
+            #     'position': [4.0, 4.5, 1.05],
+            #     'walk_direction': np.array([-1, -1, 0]) / np.sqrt(2),  # Toward robot
+            #     'walk_distance': 0.75,
+            #     'description': 'Approaching head-on'
+            # },
+        ]
+            
+            timeline = omni.timeline.get_timeline_interface()
+            
+            for i, config in enumerate(humanoid_configs):
+                print(f"\n🤖 Spawning Humanoid {i+1}/10:")
+                print(f"   Position: {config['position']}")
+                print(f"   Behavior: {config['description']}")
+                
+                # Calculate walk direction and distance
+                walk_dir = config['walk_direction']
+                walk_dist = config['walk_distance']
+                
+                # Create humanoid
+                humanoid = H1Humanoid(
+                    world=self.world,
+                    spawn_position=config['position'],
+                    walk_distance=walk_dist,
+                    walk_direction=walk_dir if walk_dist > 0 else None
                 )
                 
-                # Add timeline event callback
-                timeline = omni.timeline.get_timeline_interface()
-                self.h1_timeline_sub = timeline.get_timeline_event_stream().create_subscription_to_pop_by_type(
-                    int(omni.timeline.TimelineEventType.PLAY),
-                    self.h1_humanoid.on_timeline_event
-                )
-                
-                print("✓ H1 humanoid ready to walk")
-            else:
-                self.h1_humanoid = None
+                if humanoid.spawn():
+                    # Add physics callback
+                    self.world.add_physics_callback(
+                        f"h1_physics_step_{i}",
+                        callback_fn=humanoid.on_physics_step
+                    )
+                    
+                    # Add timeline event callback
+                    sub = timeline.get_timeline_event_stream().create_subscription_to_pop_by_type(
+                        int(omni.timeline.TimelineEventType.PLAY),
+                        humanoid.on_timeline_event
+                    )
+                    
+                    self.h1_humanoids.append(humanoid)
+                    self.h1_timeline_subs.append(sub)
+                    
+                    print(f"   ✅ Spawned successfully")
+                else:
+                    print(f"   ❌ Failed to spawn")
+            
+            print("\n" + "="*70)
+            print(f"✅ Successfully spawned {len(self.h1_humanoids)}/10 humanoids")
+            print("="*70)
+            
+            if len(self.h1_humanoids) < 10:
+                print(f"⚠️  WARNING: Only {len(self.h1_humanoids)} humanoids spawned!")
+            
         except Exception as e:
-            print(f" Failed to spawn H1: {e}")
-            self.h1_humanoid = None
+            print(f"❌ Failed to spawn humanoids: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def visualize_global_path(self, height_offset: float = 0.15):
+        """
+        Visualize the global path as a line in Isaac Sim.
+        
+        Args:
+            height_offset: Height above ground to draw the path (meters)
+        """
+        if self.waypoint_list is None or len(self.waypoint_list) < 2:
+            print("No path to visualize")
+            return
+        
+        draw = _debug_draw.acquire_debug_draw_interface()
+        
+        # Build lists of start and end points for each line segment
+        start_points = []
+        end_points = []
+        colors = []
+        sizes = []
+        num_waypoints = len(self.waypoint_list)
+
+        for i in range(num_waypoints - 1):
+            # Current waypoint
+            # Current waypoint - convert to float explicitly
+            x1 = float(self.waypoint_list[i][0])
+            y1 = float(self.waypoint_list[i][1])
+            # Next waypoint
+            x2 = float(self.waypoint_list[i + 1][0])
+            y2 = float(self.waypoint_list[i + 1][1])
+            
+            start_points.append((x1, y1, height_offset))
+            end_points.append((x2, y2, height_offset))
+            
+            # Gradient color: green at start → cyan at end
+            progress = i / len(self.waypoint_list)
+            color = (0.0, 1.0, progress, 1.0)  # Green to cyan
+            colors.append(color)
+            sizes.append(3.0)  # Line thickness
+        
+        # Draw all line segments
+        draw.draw_lines(start_points, end_points, colors, sizes)
+        
+         # Draw start marker (green sphere)
+        start_x = float(self.waypoint_list[0][0])
+        start_y = float(self.waypoint_list[0][1])
+        draw.draw_points(
+            [(start_x, start_y, height_offset + 0.1)],
+            [(0.0, 1.0, 0.0, 1.0)],  # Green
+            [15.0]  # Size
+        )
+        
+        # Draw goal marker (red sphere)
+        goal_x = float(self.waypoint_list[-1][0])
+        goal_y = float(self.waypoint_list[-1][1])
+        draw.draw_points(
+            [(goal_x, goal_y, height_offset + 0.1)],
+            [(1.0, 0.0, 0.0, 1.0)],  # Red
+            [15.0]  # Size
+        )
+        
+        print(f"✓ Visualized global path: {num_waypoints} waypoints")
+        
+        
 
 
     def visualize_3d_voxel_grid(self, robot_pose_vector):
@@ -331,7 +512,7 @@ class NavigationSimulator:
         omni.usd.get_context().open_stage(scene_path)
         self.simulation_app.update()
         
-        self.world = World(stage_units_in_meters=1.0, physics_dt=1.0/200.0)
+        self.world = World(stage_units_in_meters=1.0, physics_dt=1.0/200.0, rendering_dt = 1.0/60.0)
         # self.world.reset()
         
         # 3. Get the stage and context from the new, valid world
@@ -352,6 +533,15 @@ class NavigationSimulator:
 
         path_with_heading, grid_path = self.global_planner.plan_path(self.START_POS[:2], self.GOAL_POS)        # if not path:
         
+        if path_with_heading is not None:
+            # This is the line that saves the image
+            self.global_planner.save_path_image_with_heading(
+                path_with_heading=path_with_heading,
+                output_path="my_path_visualization.png",
+                arrow_spacing=10  # Draw an arrow every 10 points to avoid clutter
+            )
+            print("Image saved!")
+
         if path_with_heading is None:
             carb.log_error("Failed to generate a global path. Exiting.")
             self.simulation_app.close()
@@ -416,6 +606,7 @@ class NavigationSimulator:
         print(f"   Horizon: {mppi_config.planning_horizon_seconds:.2f}s")
         print(f"   Samples: {mppi_config.num_samples} trajectories")
 
+        self.visualize_global_path(height_offset=0.15)
                                
         # --- 7. CREATE ROBOT ---
         # Note: The robot's START_POS is already in the correct map coordinates
@@ -463,7 +654,7 @@ class NavigationSimulator:
             )
         )
 
-        self.setup_h1_humanoid()
+        self.setup_h1_humanoids()
         
 
         print("\n--- Simulation is running. Robot and Humans are spawned. ---")
@@ -500,6 +691,8 @@ class NavigationSimulator:
     def run_simulation_loop(self):
         """The main simulation loop where SENSE-THINK-ACT happens."""
         i = 0
+        cached_costmap = torch.zeros((256, 256), dtype=torch.float32, device='cuda')
+        cached_grid_origin = torch.zeros(2, dtype=torch.float32, device='cuda')
         try:
             while self.simulation_app.is_running():
                 dt = self.physics_context.get_physics_dt()
@@ -600,32 +793,34 @@ class NavigationSimulator:
                     sensor_pose = torch.from_numpy(sensor_pose_np).float().cuda()
                     robot_pose = torch.from_numpy(robot_pose_np).float().cuda()
 
-                    costmap_2d = self.stvl.update(raw_points, sensor_pose, robot_pose)
+                    cached_costmap = self.stvl.update(raw_points, sensor_pose, robot_pose)
                     # costmap_np = costmap_2d.cpu().numpy()
-                    costmap_tensor = costmap_2d
+                    # costmap_tensor = costmap_2d
                     
                     # if i % 5 == 0:  # Update visualization every 10 frames
                         # self.visualize_costmap(costmap_np, robot_pose_np)
                         # self.visualize_3d_voxel_grid(robot_pose_np)
                 else:
-                    # No lidar data, use empty costmap
-                    costmap_tensor = torch.zeros((128, 128), dtype=torch.float32, device='cuda')
+                #     # No lidar data, use empty costmap
+                #     costmap_tensor = torch.zeros((128, 128), dtype=torch.float32, device='cuda')
                     robot_pose_np = np.array([position_3d[0], position_3d[1], position_3d[2]])
 
                 # path_to_follow = self.waypoint_list[self.current_waypoint_idx:]
                 robot_centric_offset = self.stvl.robot_centric_offset[:2].cpu().numpy()
                 # The "Brain" (MPPI) computes the command
                 grid_origin = robot_pose_np[:2] + robot_centric_offset
-                grid_origin_tensor = torch.tensor(
-                    grid_origin,
-                    dtype=torch.float32,
-                    device='cuda'
-                )
+                # grid_origin_tensor = torch.tensor(
+                #     grid_origin,
+                #     dtype=torch.float32,
+                #     device='cuda'
+                # )
+                cached_grid_origin = torch.tensor(grid_origin, dtype=torch.float32, device='cuda')
 
+               
                 v, w = self.mppi_controller.compute_control_command(
                     current_pose=current_pose_tensor,
-                    costmap=costmap_tensor,
-                    grid_origin=grid_origin_tensor
+                    costmap=cached_costmap,
+                    grid_origin=cached_grid_origin
                 )
                     # if i % 100 == 0:
                     #     robot_x = robot_pose_np[0]
@@ -656,20 +851,26 @@ class NavigationSimulator:
                 self.robot.apply_drive_commands(v, w)
                 
                 if i % 100 == 0:
-                    progress_info = self.mppi_controller.get_progress()
+                    #progress_info = self.mppi_controller.get_progress()
                     
                     print(f"\n{'='*60}")
                     print(f"--- Frame {i} ---")
                     print(f"{'='*60}")
                     print(f"  Robot Pose: x={current_pose_2d[0]:.2f}, y={current_pose_2d[1]:.2f}, "
                         f"θ={math.degrees(yaw):.1f}°")
-                    print(f"  Progress: {progress_info['progress_pct']:.1f}%")
-                    print(f"  Distance to goal: {progress_info['remaining_distance']:.2f}m")
+                    #print(f"  Progress: {progress_info['progress_pct']:.1f}%")
+                    #print(f"  Distance to goal: {progress_info['remaining_distance']:.2f}m")
                     print(f"  MPPI Command: v={v:.3f} m/s, ω={w:.3f} rad/s")
-                    print(f"  Costmap stats: min={costmap_tensor.min().item():.3f}, "
-                        f"max={costmap_tensor.max().item():.3f}, "
-                        f"mean={costmap_tensor.mean().item():.3f}")
+                    print(f"  Costmap stats: min={cached_costmap.min().item():.3f}, "
+                        f"max={cached_costmap.max().item():.3f}, "
+                        f"mean={cached_costmap.mean().item():.3f}")
                     print(f"{'='*60}\n")
+
+                    # Print humanoid status
+                    active_humanoids = sum(1 for h in self.h1_humanoids if not h.is_stationary)
+                    print(f"  Active humanoids: {active_humanoids}/{len(self.h1_humanoids)}")
+
+
                 
                 i += 1
 

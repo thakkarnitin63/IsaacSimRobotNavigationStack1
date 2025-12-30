@@ -51,7 +51,7 @@ class MPPIController:
             self.config.horizon_steps,
             self.device
         )
-        self.control_sequence.initalize_with_forward_motion(v=0.4)
+        self.control_sequence.initalize_with_forward_motion(v=0)
 
         # Initialize noise generator
         self.noise_generator = NoiseGenerator(self.config)
@@ -62,25 +62,29 @@ class MPPIController:
         # Initialize CriticManager with unified interface
         self.critic_manager = CriticManager(
             # Obstacle avoidance
-            cost_critic_weight=3.81,
+            cost_critic_weight=4.0,   # 3.81
             
             # Path following
-            path_align_weight=10.0,
-            path_angle_weight=2.2,
-            path_follow_weight=5.0,
+            path_align_weight=0.4,    # 10.0
+            path_angle_weight=0.9,     # 2.2
+            path_follow_weight=2.0,     # 5.0
             
             # Goal reaching
-            goal_weight=5.0,
-            goal_angle_weight=3.0,
+            goal_weight=5.0,            # 5.0
+            goal_angle_weight=3.0,      # 3.0
             
             # Motion quality
-            constraint_weight=4.0,
-            # smoothness_weight=5.0,
-            twirling_weight=10.0,
-            prefer_forward_weight=5.0,
+            constraint_weight=4,      # 2.0
+            twirling_weight=4,        # 4.0
+            prefer_forward_weight=2.0,     # 15.0
+
+            speed_incentive_weight=0,  # ← NEGATIVE = REWARD!
+            enable_speed_incentive=True,
             
             # Optional
             use_deadband_critic=False,
+
+
             
             # Parameters
             resolution=self.config.grid_resolution,
@@ -160,15 +164,14 @@ class MPPIController:
         # Early Exit: check if goal reached
 
         # Check goal-> stop if reached early cycle call
-        if self.path_tracker.is_near_goal(current_pose, tolerance=0.3):
+        if self.path_tracker.is_near_goal(current_pose):
             print("GOAL REACHED!")
             return 0.0, 0.0
 
 
         # Update PathTracker (monotonic progress)
         self.path_tracker.update_progress(
-            robot_position=current_pose[:2],
-            threshold = 2.0
+            robot_position=current_pose[:2]
         )
 
 
@@ -216,7 +219,16 @@ class MPPIController:
         # Control cost: penalize large devitions from nominal
         dv = v_samples - self.control_sequence.vx.unsqueeze(0) #[K, T]
         dw = w_samples - self.control_sequence.wz.unsqueeze(0) #[K, T]
-        control_cost = gamma_vx * (dv*dv).sum(dim=1) + gamma_wz * (dw*dw).sum(dim=1)
+        # control_cost = gamma_vx * (dv*dv).sum(dim=1) + gamma_wz * (dw*dw).sum(dim=1)
+        # control_cost = (gamma_vx * (dv*dv).sum(dim=1) + 
+        #            gamma_wz * (dw*dw).sum(dim=1)) / T
+        # Nominal controls
+        vx_nom = self.control_sequence.vx.unsqueeze(0)  # [1, T]
+        wz_nom = self.control_sequence.wz.unsqueeze(0)  # [1, T]
+        
+        # MPPI's asymmetric control cost (matches paper)
+        control_cost = (gamma_vx * (dv * vx_nom).sum(dim=1) +
+                    gamma_wz * (dw * wz_nom).sum(dim=1)) 
         total_costs = total_costs + control_cost
 
 
@@ -249,26 +261,26 @@ class MPPIController:
 
         self.control_sequence.shift()   # warm_start for next iteration
 
-        if self._debug_counter % 50 == 0:
-            progress_info = self.path_tracker.get_progress_info()
-            print(f"\n🎮 MPPI Control (Cycle {self._debug_counter}):")
-            print(f"   Progress: {progress_info['progress_pct']:.1f}%")
-            print(f"   Remaining: {progress_info['remaining_distance']:.2f}m")
-            print(f"   Command: v={v:.3f} m/s, ω={w:.3f} rad/s")
-            print(f"   Cost range: [{total_costs.min().item():.1f}, "
-                  f"{total_costs.max().item():.1f}]")
+        # if self._debug_counter % 50 == 0:
+        #     # progress_info = self.path_tracker.get_progress_info()
+        #     print(f"\n🎮 MPPI Control (Cycle {self._debug_counter}):")
+        #     print(f"   Progress: {progress_info['progress_pct']:.1f}%")
+        #     print(f"   Remaining: {progress_info['remaining_distance']:.2f}m")
+        #     print(f"   Command: v={v:.3f} m/s, ω={w:.3f} rad/s")
+        #     print(f"   Cost range: [{total_costs.min().item():.1f}, "
+        #           f"{total_costs.max().item():.1f}]")
             
         self._debug_counter += 1
         return v, w
     
-    def get_progress(self) -> dict:
-        """
-        Get current progress along the path.
+    # def get_progress(self) -> dict:
+    #     """
+    #     Get current progress along the path.
         
-        Returns:
-            Dictionary with progress information
-        """
-        return self.path_tracker.get_progress_info()
+    #     Returns:
+    #         Dictionary with progress information
+    #     """
+    #     return self.path_tracker.get_progress_info()
     
     def reset(
         self,
@@ -295,6 +307,10 @@ class MPPIController:
         self._debug_counter = 0
         
         print(" MPPIController reset")
+
+
+
+    
 
 
 

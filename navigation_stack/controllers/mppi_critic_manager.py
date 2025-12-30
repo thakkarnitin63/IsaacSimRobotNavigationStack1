@@ -14,6 +14,7 @@ from .mppi_costs import (
     TwirlingCritic,
     PreferForwardCritic,
     DeadbandCritic,
+    SpeedIncentiveCritic
 )
 
 
@@ -48,7 +49,7 @@ class CriticManager:
     def __init__(
         self,
         # Obstacle avoidance weights
-        cost_critic_weight: float = 3.81,
+        cost_critic_weight: float = 4.0,
         
         # Path following weights
         path_align_weight: float = 10.0,
@@ -60,9 +61,9 @@ class CriticManager:
         goal_angle_weight: float = 3.0,
         
         # Motion quality weights
-        constraint_weight: float = 4.0,
+        constraint_weight: float = 3.0,
         # smoothness_weight: float = 5.0,
-        twirling_weight: float = 10.0,
+        twirling_weight: float = 1.5,
         prefer_forward_weight: float = 5.0,
         
         # Optional critics
@@ -71,7 +72,8 @@ class CriticManager:
         
         # Critic parameters
         resolution: float = 0.1,
-        
+        speed_incentive_weight: float = -5.0,  # NEGATIVE!
+        enable_speed_incentive: bool = True,
         # Enable/disable critics
         enable_cost_critic: bool = True,
         enable_path_align: bool = True,
@@ -163,6 +165,12 @@ class CriticManager:
             self.critics.append(DeadbandCritic(weight=deadband_weight))
             self.critic_names.append("DeadbandCritic")
 
+        if enable_speed_incentive and speed_incentive_weight != 0.0:
+            self.critics.append(SpeedIncentiveCritic(
+                weight=speed_incentive_weight
+            ))
+            self.critic_names.append("SpeedIncentiveCritic")
+
 
         print(f" CriticManager initialized with {len(self.critics)} critics:")
         for name in self.critic_names:
@@ -203,85 +211,41 @@ class CriticManager:
         Returns:
             CriticData: Unified data structure for all critics
         """
-        # Get path and goal from tracker
-        path = path_tracker.full_path  # [N, 3] on GPU
-        goal = path_tracker.goal[:2]   # [2] XY only
-        goal_heading = path_tracker.goal_heading
-        
-        # Get PathTracker state
-        furthest_idx = path_tracker.furthest_reached_idx
-        pruned_path = path_tracker.full_path[furthest_idx:] # Path ahead of robot
-        
-        if len(pruned_path) >1:
-            diffs = pruned_path[1:, :2] - pruned_path[:-1, :2]
-            segment_distances = torch.norm(diffs, dim=1)
-            pruned_path_distances = torch.cat([
-                torch.zeros(1, device=path_tracker.device),
-                torch.cumsum(segment_distances, dim=0)
-            ])
-        else:
-            pruned_path_distances = torch.zeros(1, device=path_tracker.device)
-
-        if path_tracker.path_valid_flags is not None:
-            pruned_path_valid_flags = path_tracker.path_valid_flags[furthest_idx:]
-        else:
-            pruned_path_valid_flags = None
-
-
-        path_integrated_distances = path_tracker.path_integrated_distances
-        local_path_length = path_tracker.local_path_length()
-        
         # Compute path validity (ONCE per cycle, not every frame!)
         # This is the answer to your question!
         if compute_path_validity:
             path_tracker.compute_path_validity(
                 costmap=costmap,
                 grid_origin=grid_origin,
-                resolution=self.resolution,
-                critical_threshold=1.0
+                resolution=self.resolution
             )
-            # Re prune after computing
-            if path_tracker.path_valid_flags is not None:
-                pruned_path_valid_flags = path_tracker.path_valid_flags[furthest_idx:]
-   
-        path_valid_flags = path_tracker.path_valid_flags
         
-        # Create unified data structure
-        data = CriticData(
-            # Trajectories
+        tracker_data = path_tracker.get_critic_data()
+   
+        
+        # Create CriticData
+        return CriticData(
             trajectories=trajectories,
             v_samples=v_samples,
             w_samples=w_samples,
-            
-            # Path state
-            path=pruned_path,
-            goal=goal,
-            goal_heading=goal_heading,
-            
-            # PathTracker state
-            furthest_reached_idx=0,
-            path_valid_flags=pruned_path_valid_flags,
-            path_integrated_distances=pruned_path_distances,
 
-            local_path_length=local_path_length,
+            path=tracker_data['pruned_path'],  
+            path_integrated_distances=tracker_data['path_integrated_distances'],
+            path_valid_flags=tracker_data['path_valid_flags'],
             
-            # Robot state
+            goal=tracker_data['goal'],
+            goal_heading=tracker_data['goal_heading'],
+            # furthest_reached_idx=0,  # Correct: it is 0 relative to the pruned path
+            local_path_length=tracker_data['local_path_length'],
+            
             current_pose=current_pose,
-            
-            # Perception
             costmap=costmap,
             grid_origin=grid_origin,
-            
-            # Time
             dt=dt,
-            
-            # Robot limits
             v_max=v_max,
             v_min=v_min,
             w_max=w_max
         )
-        
-        return data 
 
 
 

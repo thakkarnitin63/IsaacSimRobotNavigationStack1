@@ -29,10 +29,16 @@ lidar:
 # STVL ALGORITHM
 # =============================================================================
 stvl:
-  decay_rate: 0.35              # How fast obstacles fade (0.0-1.0)
+  decay_rate: 0.7              # How fast obstacles fade (0.0-1.0)
   min_occupancy: 0.0            # Free space value
   max_occupancy: 1.0            # Occupied value
   costmap_threshold: 0.3        # Binary threshold for 2D costmap
+  
+   # NEW: Inflation parameters
+  inflation_radius: 2           # Voxels (5 × 0.1m = 0.5m buffer)
+  inflation_scale: 2          # Decay rate (higher = slower decay)
+  
+  
 
 # =============================================================================
 # COMPUTE

@@ -4,147 +4,320 @@ from typing import Optional
 import math
 
     
-class CostCritic: #done
-    """
-    Direct Costmap Lookup for STVL costmap (values 0.0 to 1.0)
-    - Samples every Nth trajectory point (stride)
-    - Disables repulsion near goal (near_goal logic)
-    - Uses raw costmap values (not fixed penalties!)
-    - Breaks on collision (via masking)
-    - Normalizes by number of sampled points
+# class CostCritic: #done
+#     """
+#     Direct Costmap Lookup for STVL costmap (values 0.0 to 1.0)
+#     - Samples every Nth trajectory point (stride)
+#     - Disables repulsion near goal (near_goal logic)
+#     - Uses raw costmap values (not fixed penalties!)
+#     - Breaks on collision (via masking)
+#     - Normalizes by number of sampled points
     
-    Default parameters (Nav2):
-    - weight: 3.81 / 254.0 ≈ 0.015 (normalized)
-    - critical_cost: 300.0
-    - collision_cost: 1e6
-    - near_goal_distance: 0.5m
-    - stride: 2
-    - power: 1
+#     Default parameters (Nav2):
+#     - weight: 3.81 / 254.0 ≈ 0.015 (normalized)
+#     - critical_cost: 300.0
+#     - collision_cost: 1e6
+#     - near_goal_distance: 0.5m
+#     - stride: 2
+#     - power: 1
+#     """
+#     def __init__(
+#         self,
+#         weight: float = 3.81,
+#         critical_cost: float = 300.0,
+#         near_collision_threshold: float = 0.996, # 253/254
+#         collision_threshold: float = 0.999, # Lethal (254/254)
+#         collision_cost: float = 1e6,
+#         near_goal_distance: float = 0.5,
+#         stride: int = 2,
+#         resolution: float = 0.1,
+#         power: int = 1
+#         ):
+#         # Normalize weight like Nav2
+#         self.weight = weight / 254.0
+#         self.critical_cost = critical_cost
+#         self.near_collision_threshold = near_collision_threshold
+#         self.collision_threshold = collision_threshold
+#         self.collision_cost = collision_cost
+#         self.near_goal_distance = near_goal_distance
+#         self.stride = stride
+#         self.resolution = resolution
+#         self.power = power
+#         self._debug_counter = 0
+
+#     def compute(
+#         self,
+#         data: 'CriticData'
+#     )-> torch.Tensor:
+#         """
+#         Compute costmap-based obstacle cost (FULLY VECTORIZED).
+        
+#         Args:
+#             data: CriticData containing all necessary information
+        
+#         Returns:
+#             costs: [K] - Cost for each trajectory
+#         """
+#         K = data.trajectories.shape[0]
+#         device = data.trajectories.device
+
+#         # Check if near goal (scalar)
+#         near_goal = data.local_path_length < self.near_goal_distance
+
+#         # sample trajectory points with stride
+#         positions = data.trajectories[:, ::self.stride, :2]  #[K, T', 2]
+#         T_sampled = positions.shape[1]
+
+#         # Convert world -> grid coordinates
+#         grid_x = ((positions[:, :, 0] - data.grid_origin[0]) / self.resolution).long()
+#         grid_y = ((positions[:, :, 1]- data.grid_origin[1]) / self.resolution).long()
+
+#         # Clamp to valid range
+#         dim_x, dim_y = data.costmap.shape
+#         grid_x = torch.clamp(grid_x, 0, dim_x-1)
+#         grid_y = torch.clamp(grid_y, 0, dim_y-1)
+
+#         # lookup costmap values - [K, T']
+#         pose_costs = data.costmap[grid_x, grid_y]
+
+#         # Handle "break on collision" with masking 
+#         # Find first collision index for each trajectory
+#         collision_mask = pose_costs >= self.collision_threshold # [K, T'] - True where collision 253/254
+
+#         # For each trajectory, find first collision index (or T_sampled if none)
+#         # cumsum gives us the cumulative count of collisions
+#         collision_cumsum = collision_mask.long().cumsum(dim=1)  # [K, T']
+
+#         # Mask: only process points Before first collision
+#         # (collision_cumsum == 0) means no collision has occured yet
+#         valid_mask = collision_cumsum == 0 #[K, T']
+
+#         # if trajectory has Any collision, mark it 
+#         has_collision = collision_mask.any(dim=1) #[K]
+
+#         # Initialize costs array
+#         traj_costs = torch.zeros(K, device=device)
+        
+#         # Handle collisions cases
+#         #Trajectories with collisions get full collision cost
+#         traj_costs[has_collision] = self.collision_cost / float(T_sampled)
+
+#         # For non colliding trajectories, accumulate costs
+#         non_collision_mask = ~has_collision #[K]
+
+#         if non_collision_mask.any():
+#             # Get costs for non-colliding trajectories only
+#             costs_subset = pose_costs[non_collision_mask] #[K' , T']
+#             valid_subset = valid_mask[non_collision_mask] #[K' , T']
+
+#             # Critical zone penalty (>= 0.95)
+#             critical_mask = (costs_subset >= self.near_collision_threshold) & valid_subset
+#             critical_costs = critical_mask.float() * self.critical_cost #[K', T']
+
+#             # Repulsive zone (normal costs, only if Not near goal)
+#             if not near_goal:
+#                 # Use raw costmap values (scaled to 0 - 254)
+#                 # Only where cost >= 0.004 (significant) and valid
+#                 repulsive_mask = (costs_subset >= 0.004) & valid_subset & ~critical_mask
+#                 repulsive_costs = costs_subset * 254.0 * repulsive_mask.float() #[K', T']
+#             else:
+#                 repulsive_costs = torch.zeros_like(costs_subset)
+
+#             # Sum costs over time dimension
+#             total_costs = critical_costs.sum(dim=1) + repulsive_costs.sum(dim=1) #[K']
+
+#             # Normalize by number of sampled points
+#             traj_costs[non_collision_mask] = total_costs / float(T_sampled)
+        
+#         # Apply weight and power
+#         weighted_costs = traj_costs * self.weight
+#         if self.power >1:
+#             weighted_costs = weighted_costs ** self.power
+
+#         # Debug
+#         if self._debug_counter % 200 == 0:
+#             print(f"🟡 CostCritic ACTIVE")
+#             print(f"   Near goal: {near_goal}")
+#             print(f"   Sampled points: {T_sampled} (stride={self.stride})")
+#             print(f"   Collisions: {has_collision.sum().item()}/{K} trajectories")
+#             print(f"   Avg cost: {traj_costs.mean().item():.2f}")
+#             print(f"   Max cost: {traj_costs.max().item():.2f}")
+        
+#         self._debug_counter += 1
+        
+#         return weighted_costs
+
+class CostCritic:
+    """
+    Costmap-based obstacle avoidance for STVL (continuous 0.0 to 1.0).
+    
+    Cost zones:
+    - 1.0: Just marked this frame (LETHAL)
+    - 0.5: Decayed once (1 frame old)
+    - 0.25: Decayed twice (2 frames old)
+    - 0.125: Decayed three times
+    - <0.1: Old observation or free space
+
+     Threshold mapping:
+    - collision_threshold (0.9): Definite obstacle (current frame)
+    - critical_threshold (0.4): Recent obstacle (1-2 frames old)
+    - repulsion_threshold (0.15): Possible obstacle (decaying)
     """
     def __init__(
         self,
-        weight: float = 3.81,
-        critical_cost: float = 300.0,
-        near_collision_threshold: float = 0.996, # 253/254
-        collision_threshold: float = 0.999, # Lethal (254/254)
-        collision_cost: float = 1e6,
-        near_goal_distance: float = 0.5,
-        stride: int = 2,
+        weight: float = 3.81,             # Nav2 default
+        critical_cost: float = 300.0,     # Nav2 default
+        collision_cost: float = 1e6,      # Nav2 default
+        collision_threshold: float = 0.95, # >= this is LETHAL
+        critical_threshold: float = 0.7,  # >= this gets critical_cost penalty
+        near_goal_distance: float = 0.2,  # Nav2 default
+        stride: int = 2,                  # Nav2 trajectory_point_step
         resolution: float = 0.1,
         power: int = 1
-        ):
-        # Normalize weight like Nav2
+    ):
+         # Normalize weight like Nav2 (but for 0-1 range instead of 0-254)
+        # Nav2 does: weight / 254.0 to normalize 0-254 costs
+        # For STVL 0-1.0, we scale costs back up to Nav2's regime
         self.weight = weight / 254.0
         self.critical_cost = critical_cost
-        self.near_collision_threshold = near_collision_threshold
-        self.collision_threshold = collision_threshold
         self.collision_cost = collision_cost
+        self.collision_threshold = collision_threshold
+        self.critical_threshold = critical_threshold
         self.near_goal_distance = near_goal_distance
         self.stride = stride
         self.resolution = resolution
         self.power = power
         self._debug_counter = 0
 
-    def compute(
-        self,
-        data: 'CriticData'
-    )-> torch.Tensor:
+    def compute(self, data: 'CriticData') -> torch.Tensor:
         """
-        Compute costmap-based obstacle cost (FULLY VECTORIZED).
+        Compute costmap-based obstacle cost.
         
-        Args:
-            data: CriticData containing all necessary information
-        
-        Returns:
-            costs: [K] - Cost for each trajectory
+        Follows Nav2 logic:
+        1. On collision: set collision_cost, BREAK (stop evaluating trajectory)
+        2. On near-collision: ADD critical_cost
+        3. On normal obstacle: ADD scaled pose_cost (if not near goal)
+        4. Normalize by number of sampled points
         """
+
         K = data.trajectories.shape[0]
         device = data.trajectories.device
 
-        # Check if near goal (scalar)
+        if self._debug_counter % 200 == 0:
+            print(f"🔍 CostCritic INPUT DEBUG:")
+            print(f"   data.costmap shape: {data.costmap.shape}")
+            print(f"   data.costmap device: {data.costmap.device}")
+            print(f"   data.costmap max: {data.costmap.max().item():.3f}")
+            print(f"   data.grid_origin: {data.grid_origin}")
+            
+            # Check trajectory bounds
+            positions = data.trajectories[:, ::self.stride, :2]
+            print(f"   Trajectory X range: [{positions[:,:,0].min():.2f}, {positions[:,:,0].max():.2f}]")
+            print(f"   Trajectory Y range: [{positions[:,:,1].min():.2f}, {positions[:,:,1].max():.2f}]")
+            
+            # Check grid coords
+            grid_x = ((positions[:, :, 0] - data.grid_origin[0]) / self.resolution).long()
+            grid_y = ((positions[:, :, 1] - data.grid_origin[1]) / self.resolution).long()
+            print(f"   Grid X range: [{grid_x.min():.0f}, {grid_x.max():.0f}]")
+            print(f"   Grid Y range: [{grid_y.min():.0f}, {grid_y.max():.0f}]")
+            print(f"   Costmap dims: {data.costmap.shape}")
+
+        # Check if near goal
         near_goal = data.local_path_length < self.near_goal_distance
 
-        # sample trajectory points with stride
-        positions = data.trajectories[:, ::self.stride, :2]  #[K, T', 2]
+        # Sample trajectory points with stride
+        positions = data.trajectories[:, ::self.stride, :2]  # [K, T', 2]
         T_sampled = positions.shape[1]
 
-        # Convert world -> grid coordinates
+        # Convert world → grid coordinates
         grid_x = ((positions[:, :, 0] - data.grid_origin[0]) / self.resolution).long()
-        grid_y = ((positions[:, :, 1]- data.grid_origin[1]) / self.resolution).long()
+        grid_y = ((positions[:, :, 1] - data.grid_origin[1]) / self.resolution).long()
 
         # Clamp to valid range
         dim_x, dim_y = data.costmap.shape
-        grid_x = torch.clamp(grid_x, 0, dim_x-1)
-        grid_y = torch.clamp(grid_y, 0, dim_y-1)
+        grid_x = torch.clamp(grid_x, 0, dim_x - 1)
+        grid_y = torch.clamp(grid_y, 0, dim_y - 1)
 
-        # lookup costmap values - [K, T']
+        # Lookup costmap values [K, T'] - now continuous 0.0 to 1.0!
         pose_costs = data.costmap[grid_x, grid_y]
 
-        # Handle "break on collision" with masking 
-        # Find first collision index for each trajectory
-        collision_mask = pose_costs >= self.collision_threshold # [K, T'] - True where collision 253/254
+        # ══════════════════════════════════════════════════════════════
+        # COLLISION ZONE (>= 0.9): Lethal cost, break on first collision
+        # ══════════════════════════════════════════════════════════════
+        collision_mask = pose_costs >= self.collision_threshold  # [K, T']
+        
+        # Break on collision - only consider points before first collision
+        collision_cumsum = collision_mask.long().cumsum(dim=1) # [K, T']
+        valid_mask = collision_cumsum == 0  # [K, T'] - True before first collision
+        has_collision = collision_mask.any(dim=1)  # [K]
 
-        # For each trajectory, find first collision index (or T_sampled if none)
-        # cumsum gives us the cumulative count of collisions
-        collision_cumsum = collision_mask.long().cumsum(dim=1)  # [K, T']
-
-        # Mask: only process points Before first collision
-        # (collision_cumsum == 0) means no collision has occured yet
-        valid_mask = collision_cumsum == 0 #[K, T']
-
-        # if trajectory has Any collision, mark it 
-        has_collision = collision_mask.any(dim=1) #[K]
-
-        # Initialize costs array
+        # Initialize costs
         traj_costs = torch.zeros(K, device=device)
         
-        # Handle collisions cases
-        #Trajectories with collisions get full collision cost
-        traj_costs[has_collision] = self.collision_cost / float(T_sampled)
+        # Trajectories with ANY collision get collision cost
+        traj_costs[has_collision] = self.collision_cost
 
-        # For non colliding trajectories, accumulate costs
-        non_collision_mask = ~has_collision #[K]
-
-        if non_collision_mask.any():
-            # Get costs for non-colliding trajectories only
-            costs_subset = pose_costs[non_collision_mask] #[K' , T']
-            valid_subset = valid_mask[non_collision_mask] #[K' , T']
-
-            # Critical zone penalty (>= 0.95)
-            critical_mask = (costs_subset >= self.near_collision_threshold) & valid_subset
-            critical_costs = critical_mask.float() * self.critical_cost #[K', T']
-
-            # Repulsive zone (normal costs, only if Not near goal)
-            if not near_goal:
-                # Use raw costmap values (scaled to 0 - 254)
-                # Only where cost >= 0.004 (significant) and valid
-                repulsive_mask = (costs_subset >= 0.004) & valid_subset & ~critical_mask
-                repulsive_costs = costs_subset * 254.0 * repulsive_mask.float() #[K', T']
-            else:
-                repulsive_costs = torch.zeros_like(costs_subset)
-
-            # Sum costs over time dimension
-            total_costs = critical_costs.sum(dim=1) + repulsive_costs.sum(dim=1) #[K']
-
-            # Normalize by number of sampled points
-            traj_costs[non_collision_mask] = total_costs / float(T_sampled)
+        # ══════════════════════════════════════════════════════════════
+        # For non-colliding trajectories, compute gradient costs
+        # ══════════════════════════════════════════════════════════════
+        non_collision_mask = ~has_collision
         
+        if non_collision_mask.any():
+            costs_subset = pose_costs[non_collision_mask]  # [K', T']
+            valid_subset = valid_mask[non_collision_mask]  # [K', T']
+            
+            # CRITICAL ZONE : pose_cost >= critical_threshold (Nav2s: >= 253)
+            critical_mask = (costs_subset >= self.critical_threshold) & \
+                           (costs_subset < self.collision_threshold) & valid_subset
+            critical_costs = critical_mask.float() * self.critical_cost
+            
+            # REPULSION ZONE: 0 < pose_cost < critical_threshold (Nav2: else if (!near_goal) traj_cost += pose_cost)
+            # Scale STVL 0-1 to Nav2's 0-254 regime for consistent weighting
+            if not near_goal:
+                repulsion_mask = (costs_subset > 0.01) & \
+                                (costs_subset < self.critical_threshold) & valid_subset
+                # Scale to Nav2 regime: 0-1 → 0-254
+                
+                repulsion_costs = (costs_subset * 254.0) * repulsion_mask.float()  # [K', T']
+            else:
+                repulsion_costs = torch.zeros_like(costs_subset)
+            
+            # Sum over time, average by sampled points
+            total_costs = critical_costs.sum(dim=1) + repulsion_costs.sum(dim=1)
+            traj_costs[non_collision_mask] = total_costs
+
         # Apply weight and power
-        weighted_costs = traj_costs * self.weight
-        if self.power >1:
+        weighted_costs = traj_costs * (self.weight / float(T_sampled))
+        if self.power > 1:
             weighted_costs = weighted_costs ** self.power
 
-        # Debug
+        
+        # Debug output
         if self._debug_counter % 200 == 0:
-            print(f"🟡 CostCritic ACTIVE")
-            print(f"   Near goal: {near_goal}")
-            print(f"   Sampled points: {T_sampled} (stride={self.stride})")
-            print(f"   Collisions: {has_collision.sum().item()}/{K} trajectories")
-            print(f"   Avg cost: {traj_costs.mean().item():.2f}")
-            print(f"   Max cost: {traj_costs.max().item():.2f}")
+            # Find where obstacles are in grid
+            obstacle_indices = torch.where(data.costmap >= 0.9)
+            if len(obstacle_indices[0]) > 0:
+                # Convert grid indices to world coordinates
+                obs_world_x = obstacle_indices[0].float() * self.resolution + data.grid_origin[0]
+                obs_world_y = obstacle_indices[1].float() * self.resolution + data.grid_origin[1]
+                print(f"   Obstacles (>=0.9) world coords:")
+                print(f"      X range: [{obs_world_x.min():.2f}, {obs_world_x.max():.2f}]")
+                print(f"      Y range: [{obs_world_y.min():.2f}, {obs_world_y.max():.2f}]")
+            
+            # Check trajectory sample costs
+            positions = data.trajectories[:, ::self.stride, :2]
+            grid_x = ((positions[:, :, 0] - data.grid_origin[0]) / self.resolution).long()
+            grid_y = ((positions[:, :, 1] - data.grid_origin[1]) / self.resolution).long()
+            grid_x = torch.clamp(grid_x, 0, data.costmap.shape[0] - 1)
+            grid_y = torch.clamp(grid_y, 0, data.costmap.shape[1] - 1)
+            sampled_costs = data.costmap[grid_x, grid_y]
+            
+            print(f"   Sampled trajectory costs:")
+            print(f"      Max cost seen: {sampled_costs.max():.3f}")
+            print(f"      Points >= 0.5: {(sampled_costs >= 0.5).sum().item()}")
+            print(f"      Points >= 0.9: {(sampled_costs >= 0.9).sum().item()}")
         
         self._debug_counter += 1
-        
         return weighted_costs
 
 
@@ -249,8 +422,8 @@ class PathAlignCritic:
         self,
         weight: float = 10.0,
         power: int = 1,
-        max_path_occupancy_ratio: float = 0.05,
-        offset_from_furthest: int = 5,
+        max_path_occupancy_ratio: float = 0.07,
+        offset_from_furthest: int = 10,
         trajectory_point_step: int = 4,
         threshold_to_consider: float = 0.5,
         use_path_orientations: bool = False
@@ -283,452 +456,645 @@ class PathAlignCritic:
         
         # Path is already pruned! data.furthest_reached_idx  is always 0 
         # We need to compute how far trajectories reached on this pruned path
-        path_segments = data.path # already starts at robot
-
-        if len(path_segments) < self.offset_from_furthest:
-            return torch.zeros(K, device=device)
+        path_xy = data.path[:, :2] # already starts at robot  
         
         # Compute furthest point trajectories reach
         traj_endpoints = data.trajectories[:, -1, :2]  # [K, 2]
-        path_xy_full = path_segments[:, :2]  # [N, 2]
+        # path_xy_full = path_segments[:, :2]  # [N, 2]
 
         # Distance from each trajectory endpoint to each path point
-        distances = torch.cdist(traj_endpoints, path_xy_full)  # [K, N]
+        distances = torch.cdist(traj_endpoints, path_xy)  # [K, N]
         closest_path_indices = torch.argmin(distances, dim=1)  # [K]
-        furthest_path_point = torch.max(closest_path_indices).item()
+        furthest_reached = torch.max(closest_path_indices).item()
 
-        # Use path from robot (0) to where trajectories reach
-        path_segments_count = furthest_path_point + 1
-        
+        # Instead of "return if < 20", we use "min(reach + buffer, length)"
+        # This prevents deadlock at v=0 while still respecting the path limits
+        path_segments_count = min(
+            furthest_reached + self.offset_from_furthest,
+            len(path_xy)
+        )
 
+        # Early exit: haven't made enough progress yet
+        # BUT: Don't deadlock! If we have ANY path, process at least some of it
         if path_segments_count < self.offset_from_furthest:
-            return torch.zeros(K, device=device)  # Early exit as per above
-        # Calculating Path segment which is [Start: Robot position]
-        # Check if this path is not occupied by anything if its good we have clean poisiton
-        # which robot should take 
-        if data.path_valid_flags is not None:
-            valid_flags = data.path_valid_flags[:path_segments_count]
-            invalid_count =(~valid_flags).sum().float()
+            # Allow processing if we have at least 5 path points
+            if len(path_xy) < 5:
+                return torch.zeros(K, device=device)
+            path_segments_count = min(len(path_xy), self.offset_from_furthest)
 
-            if path_segments_count > 0:
+        # ============================================================
+        # Path validity check
+        # ============================================================
+        if data.path_valid_flags is not None:
+            # Only check validity up to segments we're processing
+            valid_segment = data.path_valid_flags[:path_segments_count]
+            invalid_count = (~valid_segment).sum().float()
+            
+            if path_segments_count > 5:  # Only if we have enough points
                 occupancy_ratio = invalid_count / path_segments_count
                 if (occupancy_ratio > self.max_path_occupancy_ratio and 
                     invalid_count > 2.0):
-                    
+                    if self._debug_counter % 200 == 0:
+                        print(f"⚠️ PathAlignCritic: Path blocked "
+                              f"({occupancy_ratio*100:.1f}% invalid)")
+                    self._debug_counter += 1
                     return torch.zeros(K, device=device)
             
+        path_segment_xy = path_xy[:path_segments_count]  # [P, 2]
+        path_segment_theta = data.path[:path_segments_count, 2]  # [P]
+        path_segment_distances = data.path_integrated_distances[:path_segments_count]  # [P]
         
-        path_xy = path_segments[:path_segments_count, :2] #[P, 2]
-        path_theta = path_segments[:path_segments_count, 2] # [P]
-        path_distances = data.path_integrated_distances[:path_segments_count]
-
-
+        # Path validity for this segment
         if data.path_valid_flags is not None:
-            path_valid = data.path_valid_flags[:path_segments_count] #[P]
+            path_segment_valid = data.path_valid_flags[:path_segments_count]  # [P]
         else:
-            path_valid = torch.ones(path_segments_count, dtype=torch.bool, device=device) # Placing algo
-        
-        if self._debug_counter % 200 == 0:
-            print(f"🔍 PathAlign (FIXED - Nav2 Style):")
-            print(f"   Pruned path length: {len(path_segments)}")
-            print(f"   Trajectories reach: {furthest_path_point} waypoints ahead")
-            print(f"   Using segment: [0:{path_segments_count}]")
-            print(f"   Path distances: [0.000, {path_distances[-1].item():.3f}]")
-        # Stride trajectories
+            path_segment_valid = torch.ones(
+                path_segments_count, dtype=torch.bool, device=device
+            )
 
+        # ============================================================
+        # Stride trajectories for efficiency
+        # ============================================================
         stride = self.trajectory_point_step
-        T_stride = (T-1) // stride + 1
-
-        traj_x = data.trajectories[:, ::stride, 0] #[K, T_stride]
-        traj_y = data.trajectories[:, ::stride, 1] #[K, T_stride]
-        traj_theta = data.trajectories[:, ::stride, 2] #[K, T_stride]
-
-        # Compute all trajectory integrated distance at once
-        dx = traj_x[:, 1:] - traj_x[:, :-1] # next - current  # [K ,T_stride-1]
-        dy = traj_y[:, 1:] - traj_y[:, :-1] # next - current  # [K, T_stride-1]
-        segment_lengths = torch.sqrt(dx**2 + dy**2) # [K, T_stride-1]
-
-        # Cumulative distance with zero prepended
-        zeros = torch.zeros((K,1), device=device)
-        traj_distances = torch.cat([
-            zeros, 
-            torch.cumsum(segment_lengths, dim=1)
-        ], dim=1) #[K, T_stride]
-
-        # Flatten and batch process All trajectory points
-        # Skip first point (distance = 0)
-        traj_x_flat = traj_x[:, 1:].reshape(-1) #[K*(T_stride-1)]
-        traj_y_flat = traj_y[:, 1:].reshape(-1) #[K*(T_stride-1)]
-        traj_theta_flat = traj_theta[:,1:].reshape(-1)  #[K*(T_stride-1)]
-        traj_dist_flat = traj_distances[:,1:].reshape(-1)  #[K*(T_stride-1)]
-
-        # Total number of points to process
-        N_points = len(traj_dist_flat)
-
-        # Batch Searchsorted : Find all matching path indices at once
-        path_indices = torch.searchsorted(
-            path_distances.contiguous(), #[P]
-            traj_dist_flat.contiguous(), #[N_points]
-            right = False  
-        ) # [N_points]
-
-        # Clamp to valid range
-        path_indices = torch.clamp(path_indices, 0, len(path_xy) - 1)
-
-        # Pick closer of idx-1 or idx
-        # For indices > 0, check if previous index is closer 
-        prev_indices = torch.clamp(path_indices-1, min=0)  # [N_points] Take previous of respective path indices
-
-        # Distances to current and previous indices
-        curr_dist_diff  = torch.abs(
-            path_distances[path_indices] - traj_dist_flat
-        ) #[N_points]
-        prev_dist_diff = torch.abs(
-            path_distances[prev_indices] - traj_dist_flat
-        )   # [N_points]
-
-        # Use previous index where its closer
-        use_prev = (prev_dist_diff < curr_dist_diff) & (path_indices > 0) #Take closer one mask
-        path_indices = torch.where(use_prev, prev_indices, path_indices) # where(mask, if true this, else that)
-
-        # Get all path points at once (advanced indexing)
-
-        matched_path_xy = path_xy[path_indices]  # [N_points, 2]
-        matched_path_theta = path_theta[path_indices] # [N_points]
-        matched_path_valid = path_valid[path_indices] # [N_points]
-
-
-        # Compute all XY deviations at once
-        dx_all = matched_path_xy[:, 0] - traj_x_flat # [N_points]
-        dy_all = matched_path_xy[:, 1] - traj_y_flat # [N_points]
-        xy_dist_all = torch.sqrt(dx_all**2 + dy_all**2) #[N_points]
-
-        if self.use_path_orientations:
-            #angular error
-            dyaw_all = matched_path_theta - traj_theta_flat #[N_points]
-            dyaw_all = torch.atan2(
-                torch.sin(dyaw_all),
-                torch.cos(dyaw_all)
-            ) # Normalize to [-pi to pi]
-             
-            # Combined distance 
-            total_dist_all = torch.sqrt(
-                xy_dist_all**2 + dyaw_all**2
-            ) # [N_points]
-
-        else:
-            total_dist_all = xy_dist_all #[N_points]
-
+        T_stride = (T - 1) // stride + 1
         
-        # Mask invalid points and reshape
-        # zero out invalid points
+        traj_x = data.trajectories[:, ::stride, 0]  # [K, T']
+        traj_y = data.trajectories[:, ::stride, 1]  # [K, T']
+        traj_theta = data.trajectories[:, ::stride, 2]  # [K, T']
+        
+        # ============================================================
+        # Compute trajectory integrated distances
+        # ============================================================
+        dx = traj_x[:, 1:] - traj_x[:, :-1]  # [K, T'-1]
+        dy = traj_y[:, 1:] - traj_y[:, :-1]  # [K, T'-1]
+        segment_lengths = torch.sqrt(dx**2 + dy**2)  # [K, T'-1]
+        
+        # Cumulative distance along each trajectory
+        zeros = torch.zeros((K, 1), device=device)
+        traj_distances = torch.cat([
+            zeros,
+            torch.cumsum(segment_lengths, dim=1)
+        ], dim=1)  # [K, T']
+        
+        # ============================================================
+        # Flatten for batch processing
+        # ============================================================
+        # Skip first point (distance = 0)
+        traj_x_flat = traj_x[:, 1:].reshape(-1)  # [K*(T'-1)]
+        traj_y_flat = traj_y[:, 1:].reshape(-1)  # [K*(T'-1)]
+        traj_theta_flat = traj_theta[:, 1:].reshape(-1)  # [K*(T'-1)]
+        traj_dist_flat = traj_distances[:, 1:].reshape(-1)  # [K*(T'-1)]
+        
+        N_points = len(traj_dist_flat)
+        
+        # ============================================================
+        # Find matching path points (by integrated distance)
+        # ============================================================
+        path_indices = torch.searchsorted(
+            path_segment_distances.contiguous(),
+            traj_dist_flat.contiguous(),
+            right=False
+        )  # [N_points]
+        
+        # Clamp to valid range
+        path_indices = torch.clamp(path_indices, 0, len(path_segment_xy) - 1)
+        
+        # Refine: pick closer of idx or idx-1
+        prev_indices = torch.clamp(path_indices - 1, min=0)
+        
+        curr_dist_diff = torch.abs(
+            path_segment_distances[path_indices] - traj_dist_flat
+        )
+        prev_dist_diff = torch.abs(
+            path_segment_distances[prev_indices] - traj_dist_flat
+        )
+        
+        use_prev = (prev_dist_diff < curr_dist_diff) & (path_indices > 0)
+        path_indices = torch.where(use_prev, prev_indices, path_indices)
+        
+        # ============================================================
+        # Get matched path points
+        # ============================================================
+        matched_path_xy = path_segment_xy[path_indices]  # [N_points, 2]
+        matched_path_theta = path_segment_theta[path_indices]  # [N_points]
+        matched_path_valid = path_segment_valid[path_indices]  # [N_points]
+        
+        # ============================================================
+        # Compute deviations
+        # ============================================================
+        dx_all = matched_path_xy[:, 0] - traj_x_flat
+        dy_all = matched_path_xy[:, 1] - traj_y_flat
+        xy_dist_all = torch.sqrt(dx_all**2 + dy_all**2)
+        
+        if self.use_path_orientations:
+            # Include angular error
+            dyaw_all = matched_path_theta - traj_theta_flat
+            dyaw_all = torch.atan2(torch.sin(dyaw_all), torch.cos(dyaw_all))
+            total_dist_all = torch.sqrt(xy_dist_all**2 + dyaw_all**2)
+        else:
+            total_dist_all = xy_dist_all
+        
+        # ============================================================
+        # Mask invalid points
+        # ============================================================
         total_dist_all = torch.where(
             matched_path_valid,
             total_dist_all,
             torch.zeros_like(total_dist_all)
-        ) # [N_points]  #where(mask, if true this, else that)
-
-        # Reshape back to [K, T_stride-1]
+        )
+        
+        # ============================================================
+        # Reshape and average per trajectory
+        # ============================================================
         total_dist_per_traj = total_dist_all.reshape(K, T_stride - 1)
         valid_per_traj = matched_path_valid.reshape(K, T_stride - 1)
-
-        # Sum and average per trajectory
-        summed_dist = torch.sum(total_dist_per_traj, dim=1) #[K]
-
-        # Count valid samples per trajectory
-        num_samples = torch.sum(valid_per_traj.float(), dim=1) #[K]
-
-        # average avoid division zero condition 
+        
+        summed_dist = torch.sum(total_dist_per_traj, dim=1)  # [K]
+        num_samples = torch.sum(valid_per_traj.float(), dim=1)  # [K]
+        
+        # Average (avoid division by zero)
         costs = torch.where(
             num_samples > 0,
             summed_dist / num_samples,
             torch.zeros_like(summed_dist)
-        ) #[K]
-
+        )
+        
+        # ============================================================
         # Apply weight and power
+        # ============================================================
         weighted_costs = costs * self.weight
         if self.power > 1:
             weighted_costs = weighted_costs ** self.power
-
+        
+        # ============================================================
+        # Debug output
+        # ============================================================
         if self._debug_counter % 200 == 0:
-            print(f"🟣 PathAlignCritic (VECTORIZED):")
-            print(f"   Path segments: {path_segments_count}")
-            print(f"   Trajectories: {K}")
-            print(f"   Points per trajectory: {T_stride-1}")
-            print(f"   Total points processed: {N_points}")
-            print(f"   Valid path points: {path_valid.sum().item()}/{len(path_valid)}")
+            print(f"🟣 PathAlignCritic (FIXED):")
+            print(f"   Path length: {len(path_xy)} waypoints")
+            print(f"   Furthest reached: {furthest_reached}")
+            print(f"   Processing: {path_segments_count} segments")
+            print(f"   Valid segments: {path_segment_valid.sum().item()}/{path_segments_count}")
+            print(f"   Trajectories: {K}, Points/traj: {T_stride-1}")
             print(f"   Cost range: [{weighted_costs.min().item():.3f}, "
                   f"{weighted_costs.max().item():.3f}]")
             print(f"   Mean cost: {weighted_costs.mean().item():.3f}")
-
-
-        if self._debug_counter % 200 == 0:
-            robot_x = data.current_pose[0].item()
-            robot_y = data.current_pose[1].item()
-            
-            path_first_x = path_xy[0, 0].item()
-            path_first_y = path_xy[0, 1].item()
-            
-            path_last_x = path_xy[-1, 0].item()
-            path_last_y = path_xy[-1, 1].item()
-            
-            traj_first_x = data.trajectories[0, -1, 0].item()
-            traj_first_y = data.trajectories[0, -1, 1].item()
-            
-            print(f"🚨 PATH DIRECTION CHECK:")
-            print(f"   Robot: ({robot_x:.2f}, {robot_y:.2f})")
-            print(f"   Path first point: ({path_first_x:.2f}, {path_first_y:.2f})")
-            print(f"   Path last point: ({path_last_x:.2f}, {path_last_y:.2f})")
-            print(f"   Trajectory endpoint: ({traj_first_x:.2f}, {traj_first_y:.2f})")
-            
-            # Use math.sqrt for Python floats
-            dist_first = math.sqrt((robot_x - path_first_x)**2 + (robot_y - path_first_y)**2)
-            dist_last = math.sqrt((robot_x - path_last_x)**2 + (robot_y - path_last_y)**2)
-            print(f"   Distance to path first: {dist_first:.2f}m (should be ~0, actually {dist_first:.2f})")
-            print(f"   Distance to path last: {dist_last:.2f}m (should be ~0, actually {dist_last:.2f})")
-            
-            # THIS WILL SHOW THE BUG:
-            if dist_first > 0.5:
-                print(f"   ⚠️ BUG CONFIRMED: Path first point is {dist_first:.2f}m behind robot!")
-            if dist_last < 0.3:
-                print(f"   ⚠️ BUG CONFIRMED: Path last point is at robot, not ahead!")
-            
+        
         self._debug_counter += 1
         
         return weighted_costs
 
 
 
-class PathAngleCritic: # done
-    """
-    Aligns trajectory heading with IMMEDIATE path direction.
-    - Uses furthest_reached_idx + offset (MONOTONIC - never jumps backward!)
-    - Uses actual path heading to normalize desired heading
-    - Only activates if remaining path > threshold
-    - Early exits if robot already well-aligned (< 45°)
+# class PathAngleCritic: # done
+#     """
+#     Aligns trajectory heading with IMMEDIATE path direction.
+#     - Uses furthest_reached_idx + offset (MONOTONIC - never jumps backward!)
+#     - Uses actual path heading to normalize desired heading
+#     - Only activates if remaining path > threshold
+#     - Early exits if robot already well-aligned (< 45°)
 
-    Args:
-    - weight: 2.2 (NOT 20.0!)
-    - offset_from_furthest: 4 points
-    - threshold_to_consider: 0.5m (remaining path)
-    - max_angle_to_furthest: 0.785398 rad (45°)
-    - power: 1
-    """
+#     Args:
+#     - weight: 2.2 (NOT 20.0!)
+#     - offset_from_furthest: 4 points
+#     - threshold_to_consider: 0.5m (remaining path)
+#     - max_angle_to_furthest: 0.785398 rad (45°)
+#     - power: 1
+#     """
 
+#     def __init__(
+#         self,
+#         weight: float = 2.2,
+#         offset_from_furthest: int = 4,
+#         threshold_to_consider: float = 0.5,
+#         max_angle_to_furthest: float = 0.785398,   # 45 degree early exit 0.785398
+#         power: int = 1
+#     ):
+#         self.weight = weight
+#         self.offset_from_furthest = offset_from_furthest
+#         self.threshold_to_consider = threshold_to_consider
+#         self.max_angle_to_furthest = max_angle_to_furthest
+#         self.power = power
+#         self._debug_counter = 0
+
+#     def compute(
+#         self,
+#         data: 'CriticData'
+#     )-> torch.Tensor:
+#         """
+#         Compute path angle alignment cost.
+        
+#         Args:
+#             data: CriticData containing all necessary information
+        
+#         Returns:
+#             costs: [K] - Cost for each trajectory
+#         """
+#         K = data.trajectories.shape[0]
+#         device = data.trajectories.device
+        
+#         # Check activation with remaining path distance (Turn off if near goal)
+#         if data.local_path_length < self.threshold_to_consider:
+#             return torch.zeros(K, device=device)
+        
+#         # Use furthest_reached + offset(Monotonic)
+#         path_len = data.path.shape[0]
+#         target_idx = min(self.offset_from_furthest,
+#             path_len -1
+#         )
+
+#         # Get target point position and heading
+#         target_x = data.path[target_idx, 0]
+#         target_y = data.path[target_idx,1]
+#         target_heading = data.path[target_idx, 2] # From path
+
+#         # Early Exit if robot already well aligned
+#         robot_x = data.current_pose[0]
+#         robot_y = data.current_pose[1]
+#         robot_heading = data.current_pose[2]
+
+#         # desired heading from robot to target
+#         dx = target_x - robot_x
+#         dy = target_y - robot_y
+#         desired_heading = torch.atan2(dy,dx)
+
+#         # Normalize to path heading (with in +/- 90 degree)
+#         angle_diff = desired_heading - target_heading
+#         normalized_diff = torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff))
+        
+#         # If > 90 degree away from path heading flip by 180 degree
+#         if torch.abs(normalized_diff) > 1.5708: # > pi/2
+#             desired_heading = torch.atan2(
+#                 torch.sin(desired_heading + 3.14159),
+#                 torch.cos(desired_heading + 3.14159)
+#             )
+        
+#         # Check robot alignment
+
+#         robot_error = torch.atan2(
+#             torch.sin(desired_heading - robot_heading),
+#             torch.cos(desired_heading - robot_heading)
+#         )
+        
+#         if torch.abs(robot_error) < self.max_angle_to_furthest:
+#             # Early exit
+#             if self._debug_counter % 200 == 0:
+#                 print(f"🔵 PathAngleCritic: Already aligned ({torch.abs(robot_error) * 180 / 3.14159:.1f}° < 45°)")
+#             self._debug_counter += 1
+#             return torch.zeros(K, device=device)
+        
+#         # Compute costs for trajectory endpoints
+#         traj_end_x = data.trajectories[: ,-1, 0] #[K]
+#         traj_end_y = data.trajectories[:, -1, 1] # [K]
+#         traj_end_heading = data.trajectories[:, -1, 2] #[K]
+
+#         # Desired heading: trajectory endpoint-> target point
+#         diff_x = target_x - traj_end_x #[K]
+#         diff_y = target_y - traj_end_y #[K]
+#         yaws_to_target = torch.atan2(diff_y,diff_x) #[K]
+
+#         # Normalize to path heading (within +/- 90 degree)
+#         angle_diff = yaws_to_target - target_heading #[K]
+#         normalized_diff = torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff)) # [K]
+
+#         # flip heading that are > 90 degree away from path heading
+#         flip_mask = torch.abs(normalized_diff) > 1.5708  # [K] boolean
+#         yaws_corrected = yaws_to_target.clone()
+#         yaws_corrected[flip_mask] = torch.atan2(
+#             torch.sin(yaws_to_target[flip_mask] + 3.14159),
+#             torch.cos(yaws_to_target[flip_mask] + 3.14159)
+#         )
+
+#         # Angular error betweeen trajectory heading and corrected desired heading
+#         angle_error = torch.atan2(
+#             torch.sin(traj_end_heading - yaws_corrected),
+#             torch.cos(traj_end_heading - yaws_corrected)
+#         )
+
+#         # Compute cost
+#         cost = torch.abs(angle_error) * self.weight
+
+#         if self.power > 1:
+#             cost = cost ** self.power
+
+#         # Debug
+#         if self._debug_counter % 200 == 0:
+#             threshold_deg = self.max_angle_to_furthest * 180 / 3.14159
+#             robot_error_deg = torch.abs(robot_error) * 180 / 3.14159
+#             target_heading_deg = target_heading * 180 / 3.14159
+#             avg_traj_error_deg = torch.abs(angle_error).mean().item() * 180 / 3.14159
+            
+#             print(f"🔵 PathAngleCritic ACTIVE")
+#             print(f"   Target: idx={target_idx} on pruned path")
+#             print(f"   Target heading: {target_heading_deg:.1f}°")
+#             print(f"   Robot error: {robot_error_deg:.1f}°")
+#             print(f"   Avg traj error: {avg_traj_error_deg:.1f}°")
+        
+#         self._debug_counter += 1
+
+#         return cost
+
+class PathAngleCritic:
     def __init__(
         self,
         weight: float = 2.2,
-        offset_from_furthest: int = 4,
+        lookahead_distance: float = 2.0,  # ← Use distance, not point count!
         threshold_to_consider: float = 0.5,
-        max_angle_to_furthest: float = 1.5708,   # 45 degree early exit 0.785398
+        max_angle_to_furthest: float = 0.52,
         power: int = 1
     ):
         self.weight = weight
-        self.offset_from_furthest = offset_from_furthest
+        self.lookahead_distance = lookahead_distance
         self.threshold_to_consider = threshold_to_consider
         self.max_angle_to_furthest = max_angle_to_furthest
         self.power = power
         self._debug_counter = 0
 
-    def compute(
-        self,
-        data: 'CriticData'
-    )-> torch.Tensor:
-        """
-        Compute path angle alignment cost.
-        
-        Args:
-            data: CriticData containing all necessary information
-        
-        Returns:
-            costs: [K] - Cost for each trajectory
-        """
+    def compute(self, data: 'CriticData') -> torch.Tensor:
         K = data.trajectories.shape[0]
         device = data.trajectories.device
         
-        # Check activation with remaining path distance (Turn off if near goal)
         if data.local_path_length < self.threshold_to_consider:
             return torch.zeros(K, device=device)
         
-        # Use furthest_reached + offset(Monotonic)
         path_len = data.path.shape[0]
-        target_idx = min(
-            data.furthest_reached_idx + self.offset_from_furthest,
-            path_len -1
-        )
+        
+        # ══════════════════════════════════════════════════════════════
+        # FIX: Find target by DISTANCE, not point count
+        # ══════════════════════════════════════════════════════════════
+        target_distance = min(self.lookahead_distance, data.local_path_length * 0.8)
+        
+        # Find path index at this distance using integrated distances
+        target_idx = torch.searchsorted(
+            data.path_integrated_distances.contiguous(),
+            torch.tensor(target_distance, device=device)
+        ).item()
+        target_idx = min(target_idx, path_len - 1)
+        
+        # Ensure target is beyond typical trajectory length
+        # Trajectory length ≈ avg_speed × horizon_time
+        min_target_idx = 15  # At least 15 points ahead
+        target_idx = max(target_idx, min(min_target_idx, path_len - 1))
 
-        # Get target point position and heading
+        # Get target point
         target_x = data.path[target_idx, 0]
-        target_y = data.path[target_idx,1]
-        target_heading = data.path[target_idx, 2] # From path
+        target_y = data.path[target_idx, 1]
+        target_heading = data.path[target_idx, 2]
 
-        # Early Exit if robot already well aligned
+        # Rest of the computation stays the same...
         robot_x = data.current_pose[0]
         robot_y = data.current_pose[1]
         robot_heading = data.current_pose[2]
 
-        # desired heading from robot to target
         dx = target_x - robot_x
         dy = target_y - robot_y
-        desired_heading = torch.atan2(dy,dx)
+        desired_heading = torch.atan2(dy, dx)
 
-        # Normalize to path heading (with in +/- 90 degree)
+        # Normalize to path heading
         angle_diff = desired_heading - target_heading
         normalized_diff = torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff))
         
-        # If > 90 degree away from path heading flip by 180 degree
-        if torch.abs(normalized_diff) > 1.5708: # > pi/2
+        if torch.abs(normalized_diff) > 1.5708:
             desired_heading = torch.atan2(
                 torch.sin(desired_heading + 3.14159),
                 torch.cos(desired_heading + 3.14159)
             )
         
-        # Check robot alignment
-
+        # Check robot alignment (early exit)
         robot_error = torch.atan2(
             torch.sin(desired_heading - robot_heading),
             torch.cos(desired_heading - robot_heading)
         )
         
-        if torch.abs(robot_error) < self.max_angle_to_furthest:
-            # Early exit
+        if torch.abs(robot_error) < (self.max_angle_to_furthest):
             if self._debug_counter % 200 == 0:
-                print(f"🔵 PathAngleCritic: Already aligned ({torch.abs(robot_error) * 180 / 3.14159:.1f}° < 45°)")
+                print(f"🔵 PathAngleCritic: Already aligned "
+                      f"({torch.abs(robot_error) * 180 / 3.14159:.1f}° < 45°)")
             self._debug_counter += 1
             return torch.zeros(K, device=device)
         
-        # Compute costs for trajectory endpoints
-        traj_end_x = data.trajectories[: ,-1, 0] #[K]
-        traj_end_y = data.trajectories[:, -1, 1] # [K]
-        traj_end_heading = data.trajectories[:, -1, 2] #[K]
+        # Compute trajectory endpoint angles
+        traj_end_x = data.trajectories[:, -1, 0]
+        traj_end_y = data.trajectories[:, -1, 1]
+        traj_end_heading = data.trajectories[:, -1, 2]
 
-        # Desired heading: trajectory endpoint-> target point
-        diff_x = target_x - traj_end_x #[K]
-        diff_y = target_y - traj_end_y #[K]
-        yaws_to_target = torch.atan2(diff_y,diff_x) #[K]
+        diff_x = target_x - traj_end_x
+        diff_y = target_y - traj_end_y
+        yaws_to_target = torch.atan2(diff_y, diff_x)
 
-        # Normalize to path heading (within +/- 90 degree)
-        angle_diff = yaws_to_target - target_heading #[K]
-        normalized_diff = torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff)) # [K]
+        # Normalize to path heading
+        angle_diff = yaws_to_target - target_heading
+        normalized_diff = torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff))
 
-        # flip heading that are > 90 degree away from path heading
-        flip_mask = torch.abs(normalized_diff) > 1.5708  # [K] boolean
+        flip_mask = torch.abs(normalized_diff) > 1.5708
         yaws_corrected = yaws_to_target.clone()
         yaws_corrected[flip_mask] = torch.atan2(
             torch.sin(yaws_to_target[flip_mask] + 3.14159),
             torch.cos(yaws_to_target[flip_mask] + 3.14159)
         )
 
-        # Angular error betweeen trajectory heading and corrected desired heading
         angle_error = torch.atan2(
             torch.sin(traj_end_heading - yaws_corrected),
             torch.cos(traj_end_heading - yaws_corrected)
         )
 
-        # Compute cost
         cost = torch.abs(angle_error) * self.weight
 
         if self.power > 1:
             cost = cost ** self.power
 
-        # Debug
         if self._debug_counter % 200 == 0:
             print(f"🔵 PathAngleCritic ACTIVE")
-            print(f"   Target: idx={target_idx} (furthest={data.furthest_reached_idx} + {self.offset_from_furthest})")
-            print(f"   Target pos: ({target_x:.2f}, {target_y:.2f}), heading={target_heading * 180 / 3.14159:.1f}°")
-            print(f"   Robot error: {torch.abs(robot_error) * 180 / 3.14159:.1f}° (threshold=45°)")
-            print(f"   Avg traj error: {torch.abs(angle_error).mean().item() * 180 / 3.14159:.1f}°")
+            print(f"   Target: idx={target_idx}, distance={target_distance:.2f}m")
+            print(f"   Target heading: {target_heading * 180 / 3.14159:.1f}°")
+            print(f"   Robot error: {torch.abs(robot_error) * 180 / 3.14159:.1f}°")
+            print(f"   Avg traj error: {torch.abs(angle_error).mean() * 180 / 3.14159:.1f}°")
         
         self._debug_counter += 1
-
         return cost
     
 
-class PathFollowCritic: #done
-    """
-    Drives Trajectory endpoint toward specific path point ahead of progress.
+# class PathFollowCritic: #done
+#     """
+#     Drives Trajectory endpoint toward specific path point ahead of progress.
     
-    - Targets SINGLE point (not a section!)
-    - Uses furthest_reached_idx + offset (monotonic progress)
-    - Skips blocked path points (path validity checking)
-    - Only activates if remaining path > threshold
-    args:
-    - weight: 5.0
-    - offset_from_furthest: 6 points
-    - threshold_to_consider: 1.4m (remaining path)
-    - power: 1
+#     - Targets SINGLE point (not a section!)
+#     - Uses furthest_reached_idx + offset (monotonic progress)
+#     - Skips blocked path points (path validity checking)
+#     - Only activates if remaining path > threshold
+#     args:
+#     - weight: 5.0
+#     - offset_from_furthest: 6 points
+#     - threshold_to_consider: 1.4m (remaining path)
+#     - power: 1
+#     """
+#     def __init__(
+#         self,
+#         weight: float = 5.0,              
+#         offset_from_furthest: int = 6,    
+#         threshold_to_consider: float = 1.4, 
+#         power: int = 1                    
+#     ):
+#         self.weight = weight
+#         self.offset_from_furthest = offset_from_furthest
+#         self.threshold_to_consider = threshold_to_consider
+#         self.power = power
+#         self._debug_counter = 0
+
+#     def compute(
+#         self,
+#         data: 'CriticData'
+#     ) -> torch.Tensor:
+#         """
+#         Compute path following cost.
+        
+#         Args:
+#             data: CriticData containing all necessary information
+        
+#         Returns:
+#             costs: [K] - Cost for each trajectory
+#         """
+#         K = data.trajectories.shape[0]
+#         device = data.trajectories.device
+
+#         if data.path.shape[0] < 2 or data.local_path_length < self.threshold_to_consider:
+#             return torch.zeros(K, device=device)
+#         path_len = data.path.shape[0]
+#         target_idx = min(
+#             self.offset_from_furthest,
+#             path_len -1
+#         )
+#         if data.path_valid_flags is not None:
+#             while target_idx < path_len - 1:
+#                 if data.path_valid_flags[target_idx].item():
+#                     break  # Found valid point
+#                 target_idx += 1
+#                 if self._debug_counter % 200 == 0:
+#                     print(f"   ⚠️ PathFollowCritic: Skipping blocked point")
+
+#         # Get target point (single point)
+#         target_xy = data.path[target_idx, :2] #[2]
+
+#         traj_position = data.trajectories[:, -1, :2] #[K, 2]
+
+#         diff = traj_position - target_xy #[K, 2]
+        
+#         distance = torch.linalg.norm(diff, ord=2, dim=-1) #[K]
+
+#         cost = distance * self.weight
+
+#         if self.power >1:
+#             cost = cost ** self.power
+
+#         # Debug
+#         if self._debug_counter % 200 == 0:
+#             valid = (data.path_valid_flags[target_idx].item() 
+#                     if data.path_valid_flags is not None else True)
+            
+#             print(f"🟢 PathFollowCritic ACTIVE (FIXED):")
+#             print(f"   Target: idx={target_idx} on pruned path")
+#             print(f"   Target pos: ({target_xy[0]:.2f}, {target_xy[1]:.2f})")
+#             print(f"   Valid: {valid}")
+#             print(f"   Avg endpoint distance: {distance.mean().item():.3f}m")
+#             print(f"   Remaining path: {data.local_path_length:.2f}m")
+
+#         self._debug_counter += 1
+        
+#         return cost
+class PathFollowCritic:
+    """
+    Drives trajectory endpoint toward specific path point ahead.
+    
+    Uses DISTANCE-based lookahead (not point count) for robustness.
+    This ensures the target point is always beyond trajectory endpoint,
+    regardless of path waypoint spacing.
+    
+    Args:
+        weight: Cost weight
+        lookahead_distance: How far ahead on path to target (meters)
+        threshold_to_consider: Minimum remaining path to activate (meters)
+        power: Cost exponent
     """
     def __init__(
         self,
-        weight: float = 5.0,              
-        offset_from_furthest: int = 6,    
-        threshold_to_consider: float = 1.4, 
-        power: int = 1                    
+        weight: float = 5.0,
+        lookahead_distance: float = 0.8,    # Distance in meters, not points!
+        threshold_to_consider: float = 1.4,
+        power: int = 1
     ):
         self.weight = weight
-        self.offset_from_furthest = offset_from_furthest
+        self.lookahead_distance = lookahead_distance
         self.threshold_to_consider = threshold_to_consider
         self.power = power
         self._debug_counter = 0
 
-    def compute(
-        self,
-        data: 'CriticData'
-    ) -> torch.Tensor:
-        """
-        Compute path following cost.
-        
-        Args:
-            data: CriticData containing all necessary information
-        
-        Returns:
-            costs: [K] - Cost for each trajectory
-        """
+    def compute(self, data: 'CriticData') -> torch.Tensor:
         K = data.trajectories.shape[0]
         device = data.trajectories.device
 
+        # Early exit: near goal or path too short
         if data.path.shape[0] < 2 or data.local_path_length < self.threshold_to_consider:
             return torch.zeros(K, device=device)
-        path_size = data.path.shape[0]-1
-        target_idx = min(
-            data.furthest_reached_idx + self.offset_from_furthest,
-            path_size
-        )
-        valid = False
-        while not valid and target_idx < path_size - 1:
-            valid = data.path_valid_flags[target_idx].item()
-            if not valid:
-                target_idx +=1
-                if self._debug_counter % 200 == 0:
-                    print(f"   ⚠️ Skipping blocked point at idx {target_idx-1}")
-
-        # Get target point (single point)
-        target_xy = data.path[target_idx, :2] #[2]
-
-        traj_position = data.trajectories[:, -1, :2] #[K, 2]
-
-        diff = traj_position - target_xy #[K, 2]
         
-        distance = torch.linalg.norm(diff, ord=2, dim=-1) #[K]
+        path_len = data.path.shape[0]
+        
+        # ══════════════════════════════════════════════════════════════
+        # DISTANCE-BASED TARGET SELECTION (like PathAngleCritic)
+        # ══════════════════════════════════════════════════════════════
+        
+        # Cap lookahead to 50% of remaining path (leave room for goal critics)
+        target_distance = min(self.lookahead_distance, data.local_path_length * 0.5)
+        
+        # Find path index at this distance using integrated distances
+        target_idx = torch.searchsorted(
+            data.path_integrated_distances.contiguous(),
+            torch.tensor(target_distance, device=device)
+        ).item()
+        target_idx = min(target_idx, path_len - 1)
+        
+        # Ensure minimum lookahead (at least 10 points as safety)
+        min_target_idx = 10
+        target_idx = max(target_idx, min(min_target_idx, path_len - 1))
+        
+        # Skip blocked points (if path validity is available)
+        if data.path_valid_flags is not None:
+            original_idx = target_idx
+            while target_idx < path_len - 1:
+                if data.path_valid_flags[target_idx].item():
+                    break
+                target_idx += 1
+            if target_idx != original_idx and self._debug_counter % 200 == 0:
+                print(f"   ⚠️ PathFollowCritic: Skipped {target_idx - original_idx} blocked points")
 
+        # Get target point
+        target_xy = data.path[target_idx, :2]  # [2]
+
+        # Compute distance from trajectory endpoints to target
+        traj_endpoints = data.trajectories[:, -1, :2]  # [K, 2]
+        diff = traj_endpoints - target_xy  # [K, 2]
+        distance = torch.linalg.norm(diff, ord=2, dim=-1)  # [K]
+
+        # Compute cost
         cost = distance * self.weight
 
-        if self.power >1:
+        if self.power > 1:
             cost = cost ** self.power
 
-        # Debug
+        # Debug output
         if self._debug_counter % 200 == 0:
-            print(f"🟢 PathFollowCritic ACTIVE")
-            print(f"   Target: idx={target_idx} (furthest={data.furthest_reached_idx} + {self.offset_from_furthest})")
-            print(f"   Target pos: ({target_xy[0]:.2f}, {target_xy[1]:.2f})")  # ✅ Fixed!
+            actual_distance = data.path_integrated_distances[target_idx].item()
+            valid = (data.path_valid_flags[target_idx].item() 
+                    if data.path_valid_flags is not None else True)
+            
+            print(f"🟢 PathFollowCritic ACTIVE:")
+            print(f"   Target: idx={target_idx}, distance={actual_distance:.2f}m on path")
+            print(f"   Target pos: ({target_xy[0].item():.2f}, {target_xy[1].item():.2f})")
             print(f"   Valid: {valid}")
-            print(f"   Avg endpoint distance: {distance.mean().item():.3f}m")  # ✅ Fixed!
+            print(f"   Avg endpoint distance: {distance.mean().item():.3f}m")
             print(f"   Remaining path: {data.local_path_length:.2f}m")
 
         self._debug_counter += 1
-        
         return cost
-    
 
 
 
@@ -748,12 +1114,14 @@ class GoalCritic: # Done
         self,
         weight: float = 5.0,
         threshold_to_consider: float = 1.4,
+        max_deviation_from_path: float = 3.0,
         power: int = 1   
     ):
         self.weight = weight
         self.threshold_to_consider = threshold_to_consider
         self.power = power
         self._debug_counter = 0
+        self.max_deviation_from_path = max_deviation_from_path
 
     def compute(
         self,
@@ -769,20 +1137,33 @@ class GoalCritic: # Done
         K = data.trajectories.shape[0]
         device = data.trajectories.device
 
+        robot_xy = data.current_pose[:2]
+        goal_xy = data.goal[:2]
+        actual_distance_to_goal = torch.norm(robot_xy - goal_xy).item()
+
+
         # Use remaining path distance,
         if data.local_path_length > self.threshold_to_consider:
             return torch.zeros(K, device=device)
         
+        if actual_distance_to_goal > self.max_deviation_from_path:
+            if self._debug_counter % 50 == 0:
+                print(f"⚠️ GoalCritic: Robot too far from goal!")
+                print(f"   Path remaining: {data.local_path_length:.2f}m")
+                print(f"   Actual distance: {actual_distance_to_goal:.2f}m")
+            self._debug_counter += 1
+            return torch.zeros(K, device=device)
+        
+        # Debug
         if self._debug_counter % 200 == 0:
             print(f"🎯 GoalCritic ACTIVE!")
-            print(f"   Remaining path: {data.local_path_length:.2f}m < {self.threshold_to_consider:.2f}m")
-            current_dist = torch.norm(data.current_pose[:2] - data.goal).item()
-            print(f"   Straight-line dist: {current_dist:.2f}m (for reference)")
+            print(f"   Path remaining: {data.local_path_length:.2f}m < {self.threshold_to_consider:.2f}m")
+            print(f"   Actual distance: {actual_distance_to_goal:.2f}m < {self.max_deviation_from_path:.2f}m")
         
         self._debug_counter += 1
 
         # Extract goal position (XY only)
-        goal_xy = data.goal #[2]
+        goal_xy = data.goal[:2] #[2]
 
         # Distance from all trajectory points to goal
         traj_position = data.trajectories[:,:,:2] # [K, T, 2]
@@ -855,7 +1236,7 @@ class GoalAngleCritic: #done
             print(f"   Goal heading: {data.goal_heading:.2f} rad ({data.goal_heading * 180 / 3.14159:.1f}°)")
         
         self._debug_counter += 1
-        goal_heading = data.goal_heading # Already in critic data
+        goal_heading = data.goal[2] # Already in critic data
 
         trajectory_heading = data.trajectories[:, :, 2] # [K, T]
 
@@ -972,11 +1353,13 @@ class TwirlingCritic: #done
         self,
         weight: float = 10.0,
         power: int= 1,
-        threshold_to_consider: float = 0.5
+        threshold_to_consider: float = 0.5,
+        heading_threshold: float = 0.785
     ):
         self.weight = weight
         self.power = power
         self.threshold_to_consider = threshold_to_consider
+        self.heading_threshold = heading_threshold
         self._debug_counter = 0
 
     def compute(
@@ -1207,3 +1590,21 @@ class DeadbandCritic: #done
 
 
         
+class SpeedIncentiveCritic:
+    def __init__(
+        self,
+        weight: float = 3.0,  # POSITIVE (penalty for slowness)
+        desired_velocity: float = 0.5,
+        threshold_to_consider: float = 0.5,
+        power: int = 1
+    ):
+        self.weight = weight
+        self.desired_velocity = desired_velocity
+        self.threshold_to_consider = threshold_to_consider
+        self.power = power
+    
+    def compute(self, data):
+        avg_velocity = torch.mean(torch.clamp(data.v_samples, min=0.0), dim=1)
+        velocity_deficit = self.desired_velocity - avg_velocity
+        costs = torch.clamp(velocity_deficit, min=0.0)
+        return costs * self.weight

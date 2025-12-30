@@ -95,6 +95,17 @@ class GlobalPlanner:
         self.cost_matrix = np.where(inflated_mask, 0, 1).astype(np.int8)
         self.path_grid = Grid(matrix=self.cost_matrix)
 
+    # Add to GlobalPlanner or run separately
+    def visualize_map(self, output_path="map_debug.png"):
+        """Save the cost map to see obstacles."""
+        from PIL import Image
+        
+        # cost_matrix: 1 = free, 0 = obstacle
+        vis = (self.cost_matrix * 255).astype(np.uint8)
+        img = Image.fromarray(vis)
+        img.save(output_path)
+        print(f"Saved cost map to {output_path}")
+
     def _apply_ccma_smoothing(self, waypoints_xy: np.ndarray) -> np.ndarray:
         """Apply CCMA smoothing to round corners."""
         if not self.use_ccma_smoothing or self.ccma is None:
@@ -206,6 +217,8 @@ class GlobalPlanner:
         world_waypoints = np.array([self.grid_to_world(n.x, n.y) for n in grid_path])
         smoothed = self._apply_ccma_smoothing(world_waypoints)
         path_with_heading = self._add_heading_to_path(smoothed)
+
+        # self.visualize_map()
         
         if self.debug:
             print(f"Path generated: {len(path_with_heading)} waypoints [x, y, theta]")

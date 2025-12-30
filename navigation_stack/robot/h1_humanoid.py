@@ -1,97 +1,149 @@
-import numpy as np
-from isaacsim.storage.native import get_assets_root_path
-import carb
+"""
+H1 Humanoid Robot with RL Walking Policy.
+Uses the official Isaac Sim H1FlatTerrainPolicy to make the robot walk naturally.
+"""
 
+import numpy as np
+import omni.timeline
+from omni.isaac.core.utils.rotations import quat_to_euler_angles
+
+# --- USE OFFICIAL POLICY ---
 try:
     from isaacsim.robot.policy.examples.robots.h1 import H1FlatTerrainPolicy
-    H1_AVAILABLE = True
 except ImportError:
-    H1_AVAILABLE = False
-    carb.log_warn("H1FlatTerrainPolicy not available")
+    # Fallback for older versions or different python paths
+    print("❌ Critical: Could not import H1FlatTerrainPolicy. Ensure isaacsim.robot.policy extension is enabled.")
+    H1FlatTerrainPolicy = None
+
+from isaacsim.storage.native import get_assets_root_path
 
 class H1Humanoid:
-    """Simple H1 humanoid that walks straight - based on working example."""
+    """
+    H1 humanoid that uses a Pre-trained RL policy to walk to a target.
+    """
     
-    def __init__(self, world, spawn_position, walk_distance=3.0):
+    def __init__(
+        self,
+        world,
+        spawn_position,
+        walk_distance=5.0,
+        walk_speed=0.75, # H1 walks best around 0.5 - 1.0 m/s
+        walk_direction=None 
+    ):
         self.world = world
         self.spawn_position = np.array(spawn_position)
-        self.h1_policy = None
-        self._physics_ready = False
+        self.walk_speed = walk_speed
         
-        # Simple straight walk parameters
-        self._step_count = 0
-        self._forward_speed = 0.4  # Slower than 0.75 m/s
-        self._walk_distance = walk_distance
+        # Calculate Target Position
+        if walk_direction is None or np.allclose(walk_direction, 0):
+            # Default to walking +Y if no direction
+            dir_vec = np.array([0, 1, 0])
+        else:
+            dir_vec = np.array(walk_direction[:3])
+            dir_vec = dir_vec / np.linalg.norm(dir_vec)
+
+        # Target is current pos + (direction * distance)
+        self.target_position = self.spawn_position + (dir_vec * walk_distance)
+        self.is_stationary = (walk_distance < 0.1)
+
+        self.prim_path = f"/World/H1_{id(self)}"
+        self.policy = None
+        self.initialized = False
         
-        # Calculate how many steps needed
-        physics_dt = 1.0 / 200.0
-        time_needed = self._walk_distance / self._forward_speed
-        self._target_steps = int(time_needed / physics_dt)
-        
-        print(f"H1 will walk {self._walk_distance:.2f}m at {self._forward_speed}m/s")
-        print(f"This will take {time_needed:.2f} seconds ({self._target_steps} steps)")
-        
+        print(f"H1 [{self.prim_path}] Goal: {self.target_position}")
+
     def spawn(self):
-        """Spawn the H1 robot."""
-        if not H1_AVAILABLE:
-            carb.log_error("H1 robot not available")
+        """Loads the H1 Policy and Asset."""
+        if H1FlatTerrainPolicy is None:
             return False
-        
+            
         try:
-            assets_root = get_assets_root_path()
-            if not assets_root:
-                carb.log_error("Assets path not found")
+            assets_root_path = get_assets_root_path()
+            if assets_root_path is None:
+                print("❌ Assets root path not found!")
                 return False
-            
-            print(f"Spawning H1 humanoid at {self.spawn_position}...")
-            
-            self.h1_policy = H1FlatTerrainPolicy(
-                prim_path="/World/H1_Walker",
-                name="H1_Walker",
-                usd_path=assets_root + "/Isaac/Robots/Unitree/H1/h1.usd",
-                position=self.spawn_position,
+
+            usd_path = assets_root_path + "/Isaac/Robots/Unitree/H1/h1.usd"
+
+            # The Policy class handles the spawning of the USD internally
+            self.policy = H1FlatTerrainPolicy(
+                prim_path=self.prim_path,
+                name=f"H1_{id(self)}",
+                usd_path=usd_path,
+                position=self.spawn_position
             )
             
-            print(f"✓ H1 humanoid spawned")
             return True
-            
+
         except Exception as e:
-            carb.log_error(f"Failed to spawn H1: {e}")
+            print(f"❌ Failed to spawn H1: {e}")
+            import traceback
+            traceback.print_exc()
             return False
-    
+
+    def on_timeline_event(self, event):
+        """Reset internal state on stop/play."""
+        if event.type == int(omni.timeline.TimelineEventType.STOP):
+            self.initialized = False
+        
     def on_physics_step(self, step_size):
         """
-        Physics callback - exactly like working example.
+        Called every physics step. 
+        Calculates velocity commands (v_x, v_y, omega) to steer robot to goal.
         """
-        if not self.h1_policy:
+        if self.policy is None:
             return
-        
-        if self._physics_ready:
-            # Default: stop
+
+        # 1. Late Initialization (Wait for physics to be warm)
+        if not self.initialized:
+            try:
+                self.policy.initialize()
+                self.policy.post_reset()
+                # Set initial pose logic if needed, usually policy handles it
+                self.initialized = True
+                print(f"H1 {self.prim_path} Policy Initialized.")
+            except Exception:
+                return # Skip this frame if init fails
+
+        # 2. Logic: Move to Goal
+        if self.is_stationary:
             command = [0.0, 0.0, 0.0]
-            
-            # If haven't reached target, walk forward
-            if self._step_count < self._target_steps:
-                command = [self._forward_speed, 0.0, 0.0]
-                self._step_count += 1
-            
-            # Send command to H1 policy
-            self.h1_policy.forward(step_size, command)
-            
-            # Print once when reached
-            if self._step_count == self._target_steps:
-                print(f"   🤖 H1 finished walking {self._walk_distance:.2f}m")
-                self._step_count += 1  # Increment to avoid re-printing
-                
         else:
-            # First physics step - initialize
-            print("Initializing H1 robot policy...")
-            self._physics_ready = True
-            self.h1_policy.initialize()
-            self.h1_policy.post_reset()
-            self.h1_policy.robot.set_joints_default_state(self.h1_policy.default_pos)
-    
-    def on_timeline_event(self, event):
-        """Reset when timeline is played/stopped."""
-        if self.h1_policy:
-            self._physics_ready = False
+            # Get current pose
+            current_pos, current_rot = self.policy.robot.get_world_pose()
+            
+            # Vector to target (ignore Z)
+            vec_to_target = self.target_position[:2] - current_pos[:2]
+            dist = np.linalg.norm(vec_to_target)
+
+            if dist < 0.3:
+                # Reached goal
+                command = [0.0, 0.0, 0.0]
+                self.is_stationary = True
+            else:
+                # Calculate Heading
+                desired_yaw = np.arctan2(vec_to_target[1], vec_to_target[0])
+                
+                # Get current Yaw
+                r, p, y = quat_to_euler_angles(current_rot)
+                current_yaw = y
+
+                # Calculate Angular Error (shortest path)
+                yaw_error = desired_yaw - current_yaw
+                # Normalize to -PI to +PI
+                yaw_error = (yaw_error + np.pi) % (2 * np.pi) - np.pi
+
+                # P-Controller for turning
+                kp_turn = 1.5
+                omega_z = np.clip(yaw_error * kp_turn, -1.0, 1.0)
+                
+                # Slow down forward speed if turning sharply
+                forward_speed = self.walk_speed
+                if abs(yaw_error) > 0.5: # 30 degrees
+                    forward_speed = 0.1 # Turn in place mostly
+
+                command = [forward_speed, 0.0, omega_z]
+
+        # 3. Apply Command to Policy
+        # The policy expects: forward(dt, [v_x, v_y, w_z])
+        self.policy.forward(step_size, command)
