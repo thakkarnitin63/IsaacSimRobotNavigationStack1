@@ -80,13 +80,14 @@ class STVL_System:
         self.frustum = ThreeDimensionalLidarFrustum(
             **frustum_params, device=self.device
         )
-
-        self.INFLATION_RADIUS = config['stvl'].get('inflation_radius', 3)  # voxels
-        self.INFLATION_SCALE = config['stvl'].get('inflation_scale', 0.8)  # decay factor
-
-         # Pre-compute inflation kernel (Gaussian-like decay)
-        self._inflation_kernel = self._create_inflation_kernel()
         
+        # Set based on MPPI horizon
+        # Formula: planning_radius = planning_time × max_velocity
+        # Example: 1.5s × 1.0m/s = 1.5m
+        self.PLANNING_RADIUS = 3.0                 # meters
+
+        
+
         print("STVL System Initialized!")
         print(f"  Grid: {self.grid_dims[0]}×{self.grid_dims[1]}×{self.grid_dims[2]} voxels")
         print(f"  Physical: {self.grid_dims_meters[0].item():.1f}m × "
@@ -150,8 +151,9 @@ class STVL_System:
         
         # === STEP 5: FLATTEN TO 2D COSTMAP ===
         costmap_2d = self.get_costmap()
+        distance_field = self.get_distance_field(costmap_2d)
 
-        return costmap_2d
+        return costmap_2d, distance_field
 
     def pre_process_points(self, 
                            raw_points: torch.Tensor, 
@@ -253,88 +255,6 @@ class STVL_System:
         ] = self.MAX_OCCUPANCY
 
 
-    def _create_inflation_kernel(self):
-        """
-        Inflation kernel with max cost BELOW collision threshold.
-        
-        Your CostCritic thresholds:
-        - collision_threshold: 0.95 (LETHAL)
-        - critical_threshold: 0.90 (HIGH PENALTY)
-        
-        So inflation max should be ~0.90 (triggers critical, not collision)
-        """
-        radius = self.INFLATION_RADIUS
-        scale = self.INFLATION_SCALE
-        
-        y, x = torch.meshgrid(
-            torch.arange(-radius, radius + 1, device=self.device, dtype=torch.float32),
-            torch.arange(-radius, radius + 1, device=self.device, dtype=torch.float32),
-            indexing='ij'
-        )
-        distance = torch.sqrt(x**2 + y**2)
-        
-        # ══════════════════════════════════════════════════════════════
-        # KEY: Max inflated cost = 0.90 (just below collision_threshold)
-        # Only actual obstacles (from mark_obstacles) get 1.0
-        # ══════════════════════════════════════════════════════════════
-        max_inflated = 0.90
-        
-        # Exponential decay
-        kernel = max_inflated * torch.exp(-scale * distance / radius)
-        
-        # Beyond radius = 0
-        kernel[distance > radius] = 0.0
-        
-        # Debug
-        print(f"  Inflation kernel:")
-        print(f"    Radius: {radius} voxels ({radius * self.voxel_size:.2f}m)")
-        print(f"    Scale: {scale}")
-        print(f"    Max cost: {max_inflated} (below collision_threshold=0.95)")
-        print(f"    Profile: ", end="")
-        for d in range(radius + 1):
-            cost = kernel[radius, radius + d].item()
-            print(f"d{d}={cost:.2f} ", end="")
-        print()
-        
-        return kernel.unsqueeze(0).unsqueeze(0)
-    
-
-    def _inflate_costmap(self, costmap_2d: torch.Tensor) -> torch.Tensor:
-        """
-        Apply ADDITIVE inflation (not max).
-        
-        Obstacles stay at 1.0, nearby cells get partial cost.
-        """
-        if self.INFLATION_RADIUS <= 0:
-            return costmap_2d
-        
-        # Find obstacle cells only (not already-inflated areas)
-        obstacle_mask = (costmap_2d >= 0.9).float()
-        
-        # Reshape for conv2d
-        obstacle_4d = obstacle_mask.unsqueeze(0).unsqueeze(0)
-        
-        # Pad
-        pad = self.INFLATION_RADIUS
-        obstacle_padded = torch.nn.functional.pad(
-            obstacle_4d, (pad, pad, pad, pad), mode='constant', value=0
-        )
-        
-        # Convolve to spread influence
-        inflated = torch.nn.functional.conv2d(
-            obstacle_padded,
-            self._inflation_kernel,
-            padding=0
-        )
-        
-        # Take max of original and inflated (obstacles stay at 1.0)
-        result = torch.max(costmap_2d.unsqueeze(0).unsqueeze(0), inflated)
-        
-        # Clamp to [0, 1]
-        result = torch.clamp(result, 0.0, 1.0)
-        
-        return result.squeeze(0).squeeze(0)
-
 
     def get_costmap(self):
         """
@@ -346,11 +266,119 @@ class STVL_System:
         # Project 3D → 2D (max occupancy in vertical column)
         costmap_2d, _ = torch.max(self.stvl_grid, dim=2)
         
-        # Apply inflation for safety buffer
-        costmap_inflated = self._inflate_costmap(costmap_2d)
-        # Threshold to binary (for MPPI cost function)
-        # return (costmap_2d > self.COSTMAP_THRESHOLD).float()
-        return costmap_inflated
+        
+        return costmap_2d
+    
+
+    def get_distance_field(self, costmap_2d):
+        """
+        Gives distance obstacle distance to grid cell, origin to any nearst obstacle distance,
+
+        as how far robot is compare to obstacle in following cell
+        """
+        W, H = costmap_2d.shape
+        device = self.device
+
+        obstacle_mask = costmap_2d > 0.9
+
+        # Initialize to inf 
+        distance_field = torch.full((W,H), float('inf'), device=device, dtype=torch.float32)
+
+        if not obstacle_mask.any():
+            # print("[Distance Field] No obstacles detected!")
+            return distance_field
+        
+        # Mark All obstacles as 0.0
+        distance_field[obstacle_mask]= 0.0
+
+        # Grid center (robot position)
+        center_x, center_y = W // 2, H // 2
+        radius_px = int(self.PLANNING_RADIUS / self.voxel_size)  # Radius in cells
+
+        # Filter Cells only (not obstacles)
+
+        yy, xx = torch.meshgrid(
+            torch.arange(W, device=device, dtype=torch.float32),
+            torch.arange(H, device=device, dtype=torch.float32),
+            indexing='ij'
+        )
+            
+        dist_to_center = torch.sqrt((yy-center_x)**2 + (xx-center_y)**2)
+        local_mask = dist_to_center <= radius_px  # Only consider till given radius
+
+        # Only process Free Cells within planning radius
+        local_free_mask = local_mask & (~obstacle_mask)
+        local_indices = torch.nonzero(local_free_mask).float()
+
+
+        # # Debug: 
+        # N_obstacles = obstacle_mask.sum().item()
+        # N_cells_in_radius = local_mask.sum().item()
+        # N_free_cells_in_radius = local_free_mask.sum().item()
+        
+        # print(f"\n[Distance Field Debug]")
+        # print(f"  Grid size: {W}×{H} = {W*H} cells")
+        # print(f"  Grid center (robot): [{center_x}, {center_y}]")
+        # print(f"  Planning radius: {self.PLANNING_RADIUS}m = {radius_px} cells")
+        # print(f"  Obstacles detected: {N_obstacles}")
+        # print(f"  Cells within radius: {N_cells_in_radius} ({100*N_cells_in_radius/(W*H):.1f}%)")
+        # print(f"  Free cells in radius: {N_free_cells_in_radius} ({100*N_free_cells_in_radius/(W*H):.1f}%)")
+
+
+        if local_indices.shape[0] > 0:
+            # Get all obstacle positions
+            obs_indices = torch.nonzero(obstacle_mask).float()
+
+            # Compute distances: [M_local, N_all_obstacles]
+            distances= torch.cdist(local_indices, obs_indices, p=2) * self.voxel_size
+            min_distances = distances.min(dim=1)[0]
+
+            local_x = local_indices[:, 0].long()
+            local_y = local_indices[:, 1].long()
+            distance_field[local_x, local_y] = min_distances
+
+
+            M = local_indices.shape[0]
+            N = obs_indices.shape[0]
+
+            # print(f"[Distance Field] Computed {M} cells × {N} obstacles "
+            #   f"= {M*N:,} distances ({100*M/(W*H):.1f}% of full grid)")
+            
+            # print(f"  Distance computations: {M} cells × {N} obstacles = {M*N:,}")
+            # print(f"  Speedup: {100*M*N/(W*H*N):.1f}% of full grid computation")
+            
+            # # Show distance statistics
+            # print(f"\n  Distance field statistics:")
+            # print(f"    Min distance (non-obstacle): {min_distances.min():.3f}m")
+            # print(f"    Max distance (in radius): {min_distances.max():.3f}m")
+            # print(f"    Mean distance: {min_distances.mean():.3f}m")
+            
+            # # Sample a few cells
+            # print(f"\n  Sample cells (first 5):")
+            # for i in range(min(5, M)):
+            #     x, y = local_x[i].item(), local_y[i].item()
+            #     dist = distance_field[x, y].item()
+            #     print(f"    Cell [{x:3d}, {y:3d}]: distance = {dist:.3f}m")
+        # else:
+        #     print(f"  ⚠ No free cells found in planning radius!")
+        
+        # # Check robot position distance
+        # robot_dist = distance_field[center_x, center_y].item()
+        # print(f"\n  Robot position [{center_x}, {center_y}]: distance = {robot_dist:.3f}m")
+        # if robot_dist == 0.0:
+        #     print(f"    ⚠ WARNING: Robot is on an obstacle!")
+        # elif robot_dist < 0.3:
+        #     print(f"    ⚠ WARNING: Robot very close to obstacle ({robot_dist:.3f}m)")
+        # elif robot_dist == float('inf'):
+        #     print(f"    ✓ Robot in free space (no obstacles nearby)")
+        # else:
+        #     print(f"    ✓ Robot in free space")
+        
+        return distance_field
+    
+
+
+
 
     def _transform_points(self, 
                           points: torch.Tensor, 

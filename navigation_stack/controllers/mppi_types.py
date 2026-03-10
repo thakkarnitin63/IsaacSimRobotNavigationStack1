@@ -6,18 +6,18 @@ from dataclasses import dataclass
 class MPPIConfig:
     """All hyperparameters in one place"""
     # Sampling 
-    num_samples: int = 5000 # K: Number of Trajectory Samples
-    horizon_steps: int = 30 # T : Planning horizon (timesteps)
+    num_samples: int = 2500 # K: Number of Trajectory Samples
+    horizon_steps: int = 35 # T : Planning horizon (timesteps)
     dt: float = 0.05 # 20Hz control   # deltaT: timestep duration (seconds)
-    grid_resolution: float = 0.1 # COSTMAP RESOLUTION
+    grid_resolution: float = 0.05 # COSTMAP RESOLUTION
 
     # Robot Limits
     v_max: float = 1.0                # MAX vel
     v_min: float = -0.3 # Allow reversing # MIN vel
-    w_max: float = 1.9                  # MAX angular vel
+    w_max: float = 1.4                  # MAX angular vel
 
     # Noise (exploration)
-    v_std: float = 0.35          # Linear Velocity noise std dev
+    v_std: float = 0.3          # Linear Velocity noise std dev
     w_std: float = 0.3              # Angular Velocity noise std dev
  
 

@@ -62,21 +62,23 @@ class MPPIController:
         # Initialize CriticManager with unified interface
         self.critic_manager = CriticManager(
             # Obstacle avoidance
-            cost_critic_weight=4.0,   # 3.81
+            cost_critic_weight=1.0,   # 3.81
+
+            obstacle_critic_weight=1.0,
             
             # Path following
-            path_align_weight=0.4,    # 10.0
-            path_angle_weight=0.9,     # 2.2
+            path_align_weight=0.6,    # 10.0
+            path_angle_weight=0.8,     # 2.2
             path_follow_weight=2.0,     # 5.0
             
             # Goal reaching
-            goal_weight=5.0,            # 5.0
-            goal_angle_weight=3.0,      # 3.0
+            goal_weight=3.0,            # 5.0
+            goal_angle_weight=1.0,      # 3.0
             
             # Motion quality
             constraint_weight=4,      # 2.0
-            twirling_weight=4,        # 4.0
-            prefer_forward_weight=2.0,     # 15.0
+            twirling_weight=5,        # 4.0
+            prefer_forward_weight=1.0,     # 15.0
 
             speed_incentive_weight=0,  # ← NEGATIVE = REWARD!
             enable_speed_incentive=True,
@@ -100,6 +102,7 @@ class MPPIController:
             # enable_smoothness=True,
             enable_twirling=True,
             enable_prefer_forward=True,
+            enable_obstacle_critic=True,
             
             # Statistics
             publish_stats=False,  # Set True for debugging
@@ -107,7 +110,7 @@ class MPPIController:
         )
 
         # In MPPIController.__init__():
-        print("✅ MPPIController initialized successfully")
+        print(" MPPIController initialized successfully")
         print(f"   Device: {self.device}")
         print(f"   Path points: {len(full_path)}")
         print(f"   Horizon: {self.config.horizon_steps} steps")
@@ -146,6 +149,7 @@ class MPPIController:
         self,
         current_pose: torch.Tensor,     # [3] - X Y Theta
         costmap: torch.Tensor,          # [H, W] - STVL costmap
+        distance_field: torch.Tensor,   # [H, W] - STVL distance field
         grid_origin: torch.Tensor       # [2] - costmap origin
     )-> Tuple[float, float]:
         """
@@ -198,6 +202,7 @@ class MPPIController:
             w_samples=w_samples,
             path_tracker=self.path_tracker,
             costmap=costmap,
+            distance_field=distance_field,
             grid_origin=grid_origin,
             current_pose=current_pose,
             dt=self.config.dt,

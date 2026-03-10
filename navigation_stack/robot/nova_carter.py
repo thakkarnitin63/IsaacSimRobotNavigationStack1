@@ -90,7 +90,7 @@ class NovaCarter:
         print("Initializing Lidar visualizer...")
         self._lidar_vis.initialize()
         self._lidar_vis.attach_annotator(self.annotator_key)
-        # self._lidar_vis.enable_visualization()
+        self._lidar_vis.enable_visualization()
         print("Lidar visualizer enabled.")
         
         self._robot.initialize()

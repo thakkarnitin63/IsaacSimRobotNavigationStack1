@@ -69,6 +69,7 @@ class CriticData:
 
     # Perception (Costmap)
     costmap: torch.Tensor           # [H, W] - STVL costmap (values 0.0 to 1.0)
+    distance_field: torch.Tensor    # [H, W] - STVL distance field
     grid_origin: torch.Tensor       # [2] - Costmap origin in world frame
 
     # Time & Constraints

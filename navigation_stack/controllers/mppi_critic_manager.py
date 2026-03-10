@@ -9,6 +9,7 @@ from .mppi_costs import (
     PathFollowCritic,
     CostCritic,
     GoalCritic,
+    ObstacleCritic,
     GoalAngleCritic,
     ConstraintCritic,
     TwirlingCritic,
@@ -65,13 +66,14 @@ class CriticManager:
         # smoothness_weight: float = 5.0,
         twirling_weight: float = 1.5,
         prefer_forward_weight: float = 5.0,
+        obstacle_critic_weight: float = 1.0,
         
         # Optional critics
         use_deadband_critic: bool = False,
         deadband_weight: float = 35.0,
         
         # Critic parameters
-        resolution: float = 0.1,
+        resolution: float = 0.05,
         speed_incentive_weight: float = -5.0,  # NEGATIVE!
         enable_speed_incentive: bool = True,
         # Enable/disable critics
@@ -82,6 +84,7 @@ class CriticManager:
         enable_goal: bool = True,
         enable_goal_angle: bool = True,
         enable_constraint: bool = True,
+        enable_obstacle_critic: bool = True,
         # enable_smoothness: bool = True,
         enable_twirling: bool = True,
         enable_prefer_forward: bool = True,
@@ -170,6 +173,13 @@ class CriticManager:
                 weight=speed_incentive_weight
             ))
             self.critic_names.append("SpeedIncentiveCritic")
+        
+        if enable_obstacle_critic and obstacle_critic_weight > 0:
+            self.critics.append(ObstacleCritic(
+                weight=obstacle_critic_weight,
+                resolution=resolution
+            ))
+            self.critic_names.append("ObstacleCritic")
 
 
         print(f" CriticManager initialized with {len(self.critics)} critics:")
@@ -183,6 +193,7 @@ class CriticManager:
         w_samples: torch.Tensor,
         path_tracker,  # PathTracker instance
         costmap: torch.Tensor,
+        distance_field: torch.Tensor,
         grid_origin: torch.Tensor,
         current_pose: torch.Tensor,
         dt: float,
@@ -240,6 +251,7 @@ class CriticManager:
             
             current_pose=current_pose,
             costmap=costmap,
+            distance_field=distance_field,
             grid_origin=grid_origin,
             dt=dt,
             v_max=v_max,

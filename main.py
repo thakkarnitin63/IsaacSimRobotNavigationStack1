@@ -154,41 +154,7 @@ class NavigationSimulator:
         draw.draw_points(point_list, colors, sizes)
         print(f"   ✓ Drew {len(point_list)} points (sampled from {len(points_world)})")
 
-    # def setup_h1_humanoid(self):
-    #     """Spawn H1 humanoid robot that walks straight."""
-    #     try:
-    #         print("Spawning H1 humanoid robot...")
-            
-    #         # Spawn position: left side of warehouse, facing +Y direction
-    #         spawn_pos = [0, 4.0, 1.05]  # Near left wall
-    #         walk_distance = 5.0  # Walk 3.5 meters (from y=1.0 to y=4.5)
-            
-    #         self.h1_humanoid = H1Humanoid(
-    #             world=self.world,
-    #             spawn_position=spawn_pos,
-    #             walk_distance=walk_distance
-    #         )
-            
-    #         if self.h1_humanoid.spawn():
-    #             # Add physics callback
-    #             self.world.add_physics_callback(
-    #                 "h1_physics_step",
-    #                 callback_fn=self.h1_humanoid.on_physics_step
-    #             )
-                
-    #             # Add timeline event callback
-    #             timeline = omni.timeline.get_timeline_interface()
-    #             self.h1_timeline_sub = timeline.get_timeline_event_stream().create_subscription_to_pop_by_type(
-    #                 int(omni.timeline.TimelineEventType.PLAY),
-    #                 self.h1_humanoid.on_timeline_event
-    #             )
-                
-    #             print("✓ H1 humanoid ready to walk")
-    #         else:
-    #             self.h1_humanoid = None
-    #     except Exception as e:
-    #         print(f" Failed to spawn H1: {e}")
-    #         self.h1_humanoid = None
+
 
     def setup_h1_humanoids(self):
         """
@@ -210,69 +176,53 @@ class NavigationSimulator:
             # Define spawn configurations
             # Format: (position, walk_direction, walk_distance, description)
             humanoid_configs = [
-            # ═══════════════════════════════════════════════════════════════
-            # DEMO SCENARIO: Obstacle Course for Video
-            # Robot path: (-1,-1) → (5,5) diagonal
-            # ═══════════════════════════════════════════════════════════════
-            
-            # 1. EARLY BLOCKER - Stationary on path (forces initial detour)
-            {
-                'position': [0.5, 0.5, 1.05],
-                'walk_direction': np.array([0, 0, 0]),
-                'walk_distance': 0.0,
-                'description': 'Stationary blocker (early path)'
-            },
-            
-            # 2. CROSSING PEDESTRIAN - Walks across path from left
-            {
-                'position': [1.0, 2.5, 1.05],
-                'walk_direction': np.array([1, -1, 0]) / np.sqrt(2),  # Diagonal toward path
-                'walk_distance': 1.2,
-                'description': 'Crossing from left'
-            },
-            
-            # # 3. MID-PATH BLOCKER - Stationary, forces second detour
-            {
-                'position': [2.5, 2.5, 1.05],
-                'walk_direction': np.array([0, 0, 0]),
-                'walk_distance': 0.0,
-                'description': 'Stationary blocker (mid path)'
-            },
-            
-            # # # 4. PARALLEL WALKER - Walking same direction as robot (robot overtakes)
-            {
-                'position': [3.0, 2.5, 1.05],
-                'walk_direction': np.array([1, 1, 0]) / np.sqrt(2),  # Same direction as robot
-                'walk_distance': 1.5,
-                'description': 'Walking parallel (slow)'
-            },
-            
-            # 5. APPROACHING FROM GOAL - Walks toward robot (head-on scenario)
-            # {
-            #     'position': [4.0, 4.5, 1.05],
-            #     'walk_direction': np.array([-1, -1, 0]) / np.sqrt(2),  # Toward robot
-            #     'walk_distance': 0.75,
-            #     'description': 'Approaching head-on'
-            # },
-        ]
+    # Simple, clear 3-crossing scenario
+    
+    # Crossing 1: Early, slow crosser
+    {
+        'position': [1.5, 0.5, 1.05],
+        'walk_direction': np.array([-1, 1, 0]) / np.sqrt(2),
+        'walk_distance': 1.8,
+        'start_delay': 0.0,
+        'description': 'Crossing 1/3: Early section'
+    },
+    
+    {
+        'position': [1.5, 2.8, 1.05],  # ← MOVED: Start further back
+        'walk_direction': np.array([1, -1, 0]) / np.sqrt(2),  # SE
+        'walk_distance': 1.3,  # ← INCREASED: Longer walk to cross later
+        'start_delay': 3.0,
+        'description': 'Crossing 2/3: Mid section'
+    },
+    
+    # ────────────────────────────────────────────────────────────
+    # CROSSING 3: Late (robot reaches [4,4] at ~18 sec)
+    # FIXED: Start BEHIND and to the side
+    # ────────────────────────────────────────────────────────────
+    {
+        'position': [2.3, 4.5, 1.05],  # ← MOVED: Start further back
+        'walk_direction': np.array([1, -1, 0]) / np.sqrt(2),  # SE
+        'walk_distance': 2.0,  # ← INCREASED: Longer walk
+        'start_delay':5.2,
+        'description': 'Crossing 3/3: Late section'
+    },
+]
             
             timeline = omni.timeline.get_timeline_interface()
             
             for i, config in enumerate(humanoid_configs):
-                print(f"\n🤖 Spawning Humanoid {i+1}/10:")
+                print(f"\n Spawning Humanoid {i+1}/10:")
                 print(f"   Position: {config['position']}")
                 print(f"   Behavior: {config['description']}")
                 
-                # Calculate walk direction and distance
-                walk_dir = config['walk_direction']
-                walk_dist = config['walk_distance']
-                
-                # Create humanoid
+                delay = config.get('start_delay', 0.0)
+
                 humanoid = H1Humanoid(
                     world=self.world,
                     spawn_position=config['position'],
-                    walk_distance=walk_dist,
-                    walk_direction=walk_dir if walk_dist > 0 else None
+                    walk_distance=config['walk_distance'],
+                    walk_direction=config['walk_direction'],
+                    start_delay=delay  # <--- Pass the delay here
                 )
                 
                 if humanoid.spawn():
@@ -291,19 +241,19 @@ class NavigationSimulator:
                     self.h1_humanoids.append(humanoid)
                     self.h1_timeline_subs.append(sub)
                     
-                    print(f"   ✅ Spawned successfully")
+                    print(f"    Spawned successfully")
                 else:
-                    print(f"   ❌ Failed to spawn")
+                    print(f"    Failed to spawn")
             
             print("\n" + "="*70)
-            print(f"✅ Successfully spawned {len(self.h1_humanoids)}/10 humanoids")
+            print(f" Successfully spawned {len(self.h1_humanoids)}/10 humanoids")
             print("="*70)
             
             if len(self.h1_humanoids) < 10:
-                print(f"⚠️  WARNING: Only {len(self.h1_humanoids)} humanoids spawned!")
+                print(f"  WARNING: Only {len(self.h1_humanoids)} humanoids spawned!")
             
         except Exception as e:
-            print(f"❌ Failed to spawn humanoids: {e}")
+            print(f" Failed to spawn humanoids: {e}")
             import traceback
             traceback.print_exc()
 
@@ -377,7 +327,7 @@ class NavigationSimulator:
         
         # Get 3D grid and project to 2D (max over Z)
         stvl_grid_3d = self.stvl.stvl_grid.cpu().numpy()  # [W, H, D]
-        costmap_2d = np.max(stvl_grid_3d, axis=2)  # [W, H] - max occupancy per column
+        costmap_2d,_ = np.max(stvl_grid_3d, axis=2)  # [W, H] - max occupancy per column
         
         grid_dims = self.stvl.grid_dims
         voxel_size = self.stvl.voxel_size
@@ -390,7 +340,7 @@ class NavigationSimulator:
         if len(occupied_indices) == 0:
             return
         
-        # print(f"   🧊 Drawing {len(occupied_indices)} grid bars")
+        # print(f"    Drawing {len(occupied_indices)} grid bars")
         
         max_height = 1.0  # Maximum bar height in meters
         
@@ -455,7 +405,7 @@ class NavigationSimulator:
         occupied_indices = np.argwhere(costmap_2d > 0.1)
         
         # Debug print
-        print(f"   🗺️ Costmap: {len(occupied_indices)} cells, max={costmap_2d.max():.3f}, grid_origin={grid_origin}")
+        print(f"    Costmap: {len(occupied_indices)} cells, max={costmap_2d.max():.3f}, grid_origin={grid_origin}")
         
         if occupied_indices.shape[0] == 0:
             return
@@ -655,44 +605,22 @@ class NavigationSimulator:
         )
 
         self.setup_h1_humanoids()
+
+        self.cached_costmap = torch.zeros((256, 256), dtype=torch.float32, device='cuda')
+        self.cached_grid_origin = torch.zeros(2, dtype=torch.float32, device='cuda')
+        self.cached_distance_field = torch.full(  
+        (256, 256), float('inf'), dtype=torch.float32, device='cuda'
+    )
         
 
         print("\n--- Simulation is running. Robot and Humans are spawned. ---")
 
-
-    def get_current_target(self, current_pose_2d):
-        """
-        Manages the list of waypoints.
-        Returns the current target and advances to the next if we're close.
-        """
-        if self.current_waypoint_idx >= len(self.waypoint_list):
-            return None  # We have reached the final goal
-
-        target_waypoint = self.waypoint_list[self.current_waypoint_idx]
-        
-        # Check distance to the current target (only x, y)
-        dist_to_target = np.linalg.norm(current_pose_2d[:2] - target_waypoint[:2])
-        
-        if dist_to_target < self.goal_threshold:
-            x, y, theta = target_waypoint
-            print(f"Reached waypoint {self.current_waypoint_idx}: ({x:.2f}, {y:.2f}) theta={math.degrees(theta):.1f}°")
-            self.current_waypoint_idx += 1
-            
-            if self.current_waypoint_idx >= len(self.waypoint_list):
-                print("--- FINAL GOAL REACHED! ---")
-                return None
-            
-            # Get the *new* next waypoint
-            target_waypoint = self.waypoint_list[self.current_waypoint_idx]
-            
-        return target_waypoint
         
 
     def run_simulation_loop(self):
         """The main simulation loop where SENSE-THINK-ACT happens."""
         i = 0
-        cached_costmap = torch.zeros((256, 256), dtype=torch.float32, device='cuda')
-        cached_grid_origin = torch.zeros(2, dtype=torch.float32, device='cuda')
+        
         try:
             while self.simulation_app.is_running():
                 dt = self.physics_context.get_physics_dt()
@@ -700,7 +628,7 @@ class NavigationSimulator:
                     dt = 1.0 / 200.0 
                 
                 # Update simulation
-                self.simulation_app.update()
+                self.world.step(render=True)
                 
                 
                 # --- SENSE ---
@@ -720,64 +648,7 @@ class NavigationSimulator:
                 dtype=torch.float32,
                 device='cuda'
                 )
-    
 
-
-                
-
-                    # points_in_world_frame = self.robot.get_lidar_world_points()
-
-                    # if points_in_world_frame.size > 0 and i % 10 == 0:
-                    #     self.clear_debug_drawing()
-                        
-                        # # Get robot and lidar positions for reference
-                        # robot_pos, _ = self.robot.get_world_pose()
-                        # lidar_pos, _ = self.robot._lidar_vis.get_world_pose()
-                        
-                        # # Draw the points (green)
-                        # self.visualize_lidar_points(
-                        #     points_in_world_frame,
-                        #     color=(1.0, 0.0, 0.0)  # Green points
-                        # )
-                        
-                        # # Draw reference markers
-                        # draw = _debug_draw.acquire_debug_draw_interface()
-                        
-                        # 1. Big RED sphere at robot base
-                        # draw.draw_points([tuple(robot_pos)], [(1.0, 0.0, 0.0, 1.0)], [0.3])
-                        
-                        # 2. Big YELLOW sphere at lidar sensor
-                        # draw.draw_points([tuple(lidar_pos)], [(1.0, 1.0, 0.0, 1.0)], [0.2])
-                        
-                        # 3. Draw axes at lidar position
-                        # axis_length = 1.0
-                        # start_points = [tuple(lidar_pos)] * 3
-                        # end_points = [
-                        #     tuple(lidar_pos + np.array([axis_length, 0, 0])),  # X red
-                        #     tuple(lidar_pos + np.array([0, axis_length, 0])),  # Y green
-                        #     tuple(lidar_pos + np.array([0, 0, axis_length]))   # Z blue
-                        # ]
-                        # line_colors = [
-                        #     (1.0, 0.0, 0.0, 1.0),
-                        #     (0.0, 1.0, 0.0, 1.0),
-                        #     (0.0, 0.0, 1.0, 1.0)
-                        # ]
-                        # line_sizes = [5.0, 5.0, 5.0]
-                        
-                        # draw.draw_lines(start_points, end_points, line_colors, line_sizes)
-                        
-                        # # 4. Print stats every 100 frames
-                        # if i % 100 == 0:
-                        # #     print(f"\n📊 Frame {i} Lidar Stats:")
-                        # #     print(f"   Points visualized: {len(points_in_world_frame)}")
-                        # #     print(f"   Robot at: [{robot_pos[0]:.2f}, {robot_pos[1]:.2f}, {robot_pos[2]:.2f}]")
-                        # #     print(f"   Lidar at: [{lidar_pos[0]:.2f}, {lidar_pos[1]:.2f}, {lidar_pos[2]:.2f}]")
-                            
-                        #     # Check if test cube is in view
-                        #     test_cube_pos = np.array([-3.0, 0.0, 0.5])
-                        #     dist_to_cube = np.linalg.norm(points_in_world_frame - test_cube_pos, axis=1)
-                        #     points_near_cube = np.sum(dist_to_cube < 1.0)
-                        #     # print(f"   Points near test cube (<1m): {points_near_cube}")
                 
 
                     # --- THINK ---
@@ -793,57 +664,23 @@ class NavigationSimulator:
                     sensor_pose = torch.from_numpy(sensor_pose_np).float().cuda()
                     robot_pose = torch.from_numpy(robot_pose_np).float().cuda()
 
-                    cached_costmap = self.stvl.update(raw_points, sensor_pose, robot_pose)
-                    # costmap_np = costmap_2d.cpu().numpy()
-                    # costmap_tensor = costmap_2d
-                    
-                    # if i % 5 == 0:  # Update visualization every 10 frames
-                        # self.visualize_costmap(costmap_np, robot_pose_np)
-                        # self.visualize_3d_voxel_grid(robot_pose_np)
-                else:
-                #     # No lidar data, use empty costmap
-                #     costmap_tensor = torch.zeros((128, 128), dtype=torch.float32, device='cuda')
-                    robot_pose_np = np.array([position_3d[0], position_3d[1], position_3d[2]])
+                    self.cached_costmap, self.cached_distance_field = self.stvl.update(raw_points, sensor_pose, robot_pose)
 
-                # path_to_follow = self.waypoint_list[self.current_waypoint_idx:]
-                robot_centric_offset = self.stvl.robot_centric_offset[:2].cpu().numpy()
-                # The "Brain" (MPPI) computes the command
-                grid_origin = robot_pose_np[:2] + robot_centric_offset
-                # grid_origin_tensor = torch.tensor(
-                #     grid_origin,
-                #     dtype=torch.float32,
-                #     device='cuda'
-                # )
-                cached_grid_origin = torch.tensor(grid_origin, dtype=torch.float32, device='cuda')
+                    robot_centric_offset = self.stvl.robot_centric_offset[:2].cpu().numpy()
+               
+                    grid_origin = robot_pose_np[:2] + robot_centric_offset
+                    self.cached_grid_origin = torch.tensor(
+                        grid_origin, dtype=torch.float32, device='cuda'
+                    )
+                    self.cached_grid_origin = torch.tensor(grid_origin, dtype=torch.float32, device='cuda')
 
                
                 v, w = self.mppi_controller.compute_control_command(
                     current_pose=current_pose_tensor,
-                    costmap=cached_costmap,
-                    grid_origin=cached_grid_origin
+                    costmap=self.cached_costmap,
+                    distance_field=self.cached_distance_field, 
+                    grid_origin=self.cached_grid_origin
                 )
-                    # if i % 100 == 0:
-                    #     robot_x = robot_pose_np[0]
-                    #     robot_y = robot_pose_np[1]
-                        
-                    #     print(f"\n🎯 Path Verification:")
-                    #     print(f"   Robot at: ({robot_x:.2f}, {robot_y:.2f})")
-                    #     print(f"   Should be near X=1.0 (error: {abs(robot_x - 1.0):.2f}m)")
-                        
-                    #     # Print path chunk
-                    #     chunk = self.mppi_controller.current_path_chunk
-                    #     if chunk is not None and len(chunk) > 0:
-                    #         print(f"   Path chunk[0]: ({chunk[0][0]:.2f}, {chunk[0][1]:.2f})")
-                    #         if len(chunk) > 5:
-                    #             print(f"   Path chunk[5]: ({chunk[5][0]:.2f}, {chunk[5][1]:.2f})")
-                    #         print(f"   Chunk length: {len(chunk)} waypoints")
-                            
-                    #         # CRITICAL DEBUG: Check if costmap has high costs at path location
-                    #         # This helps identify if obstacle avoidance is fighting path following
-                    #         if costmap_tensor is not None:
-                    #             print(f"   Costmap stats: min={costmap_tensor.min().item():.3f}, "
-                    #                 f"max={costmap_tensor.max().item():.3f}, "
-                    #                 f"mean={costmap_tensor.mean().item():.3f}")
     
                 
                 # --- ACT ---
@@ -861,9 +698,9 @@ class NavigationSimulator:
                     #print(f"  Progress: {progress_info['progress_pct']:.1f}%")
                     #print(f"  Distance to goal: {progress_info['remaining_distance']:.2f}m")
                     print(f"  MPPI Command: v={v:.3f} m/s, ω={w:.3f} rad/s")
-                    print(f"  Costmap stats: min={cached_costmap.min().item():.3f}, "
-                        f"max={cached_costmap.max().item():.3f}, "
-                        f"mean={cached_costmap.mean().item():.3f}")
+                    print(f"  Costmap stats: min={self.cached_costmap.min().item():.3f}, "
+                        f"max={self.cached_costmap.max().item():.3f}, "
+                        f"mean={self.cached_costmap.mean().item():.3f}")
                     print(f"{'='*60}\n")
 
                     # Print humanoid status
@@ -871,7 +708,6 @@ class NavigationSimulator:
                     print(f"  Active humanoids: {active_humanoids}/{len(self.h1_humanoids)}")
 
 
-                
                 i += 1
 
         except KeyboardInterrupt:
